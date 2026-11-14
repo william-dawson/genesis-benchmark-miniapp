@@ -226,6 +226,8 @@ static struct cudaDeviceProp  prop;
 
 /* flags */
 static int flag_build_pairlist_on_GPU = 0;
+extern "C" int genesis_pair_sort_enabled();
+extern "C" int genesis_pair_sort_copy(int *,size_t,cudaStream_t);
 
 /* */
 static int *dummy_buf = NULL;
@@ -505,6 +507,7 @@ void gpu_memcpy_h2d_energy(
 	    CUDA_CALL( cudaMemcpy( dev_univ_ix_natom      , _univ_ix_natom      , size_univ_ix_natom      , cudaMemcpyHostToDevice ) );
 	    CUDA_CALL( cudaMemcpy( dev_univ_iy_natom      , _univ_iy_natom      , size_univ_iy_natom      , cudaMemcpyHostToDevice ) );
 	}
+        if(!genesis_pair_sort_copy(dev_univ_ij_sort_list,size_univ_ij_sort_list,stream[0]))
         CUDA_CALL( cudaMemcpy( dev_univ_ij_sort_list  , _univ_ij_sort_list  , size_univ_ij_sort_list  , cudaMemcpyHostToDevice ) );
         CUDA_CALL( cudaMemcpy( dev_virial_check       , _virial_check       , size_virial_check       , cudaMemcpyHostToDevice ) );
         // CUDA_CALL( cudaMemcpy( dev_univ_mask2         , _univ_mask2         , size_univ_mask2         , cudaMemcpyHostToDevice ) );
@@ -522,6 +525,7 @@ void gpu_memcpy_h2d_energy(
 	    CUDA_CALL( cudaMemcpy( dev_univ_ix_natom      , _univ_ix_natom      , size_univ_ix_natom      , cudaMemcpyHostToDevice ) );
 	    CUDA_CALL( cudaMemcpy( dev_univ_iy_natom      , _univ_iy_natom      , size_univ_iy_natom      , cudaMemcpyHostToDevice ) );
 	}
+        if(!genesis_pair_sort_copy(dev_univ_ij_sort_list,size_univ_ij_sort_list,stream[0]))
         CUDA_CALL( cudaMemcpy( dev_univ_ij_sort_list  , _univ_ij_sort_list  , size_univ_ij_sort_list  , cudaMemcpyHostToDevice ) );
 
         // size_univ_mask2 = sizeof(int8_t) * univ_mask2_size * univ_ncell_near ;
@@ -595,6 +599,7 @@ void gpu_memcpy_h2d_force(
 	    CUDA_CALL( cudaMemcpyAsync( dev_univ_ix_natom, _univ_ix_natom, size_univ_ix_natom, cudaMemcpyHostToDevice, st ) );
 	    CUDA_CALL( cudaMemcpyAsync( dev_univ_iy_natom, _univ_iy_natom, size_univ_iy_natom, cudaMemcpyHostToDevice, st ) );
 	}
+        if(!genesis_pair_sort_copy(dev_univ_ij_sort_list,size_univ_ij_sort_list,st))
 	CUDA_CALL( cudaMemcpyAsync( dev_univ_ij_sort_list, _univ_ij_sort_list, size_univ_ij_sort_list, cudaMemcpyHostToDevice, st ) );
 
         // size_univ_mask2 = sizeof(int8_t) * univ_mask2_size * univ_ncell_near ;
@@ -7490,6 +7495,7 @@ void gpu_wait_build_pairlist(
     int           univ_ncell_near
     )
 {
+    if(genesis_pair_sort_enabled())return;
 #if 1 /* for debug */
     cudaMemsetAsync( dummy_buf, 0, 1, p_stream[0] );
     cudaStreamSynchronize( p_stream[0] );
@@ -7930,5 +7936,11 @@ extern "C" void gpu_sparse_download_(uint8_t *dense,uint8_t *packed,const int *b
 extern "C" void genesis_nonbond_force_view(void **force,void **queue) {
     if(sizeof(REAL)!=sizeof(double))abort();
     *force=dev_force;
+    *queue=reinterpret_cast<void*>(stream[0]);
+}
+
+extern "C" void genesis_pair_sort_view(int **ix,int **iy,void **queue) {
+    if(!dev_univ_ix_natom || !dev_univ_iy_natom || !flag_build_pairlist_on_GPU)abort();
+    *ix=dev_univ_ix_natom;*iy=dev_univ_iy_natom;
     *queue=reinterpret_cast<void*>(stream[0]);
 }

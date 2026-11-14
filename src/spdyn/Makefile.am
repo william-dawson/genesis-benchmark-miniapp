@@ -35,6 +35,7 @@ spdyn_SOURCES = \
 	sp_pairlist_fugaku.fpp \
 	pair_sparse.fpp \
 	pair_host.fpp \
+	pair_sort.fpp \
 	pair_pack.c \
 	sp_pairlist_gpu.fpp \
 	sp_pairlist.fpp \
@@ -132,6 +133,7 @@ spdyn_SOURCES += \
 	gpu_pme.cu \
 	pair_sparse_gpu.cu \
 	pair_compact_gpu.cu \
+	pair_sort_gpu.cu \
 	pme_mesh_sum.fpp \
 	pme_host_pack.fpp \
 	gpu_common.h \
@@ -208,5 +210,7 @@ sp_update_domain.o sp_enefunc.o sp_md_respa.o: maintenance_probe.o
 
 incoming_oracle.o: sp_domain_str.o sp_constraints_str.o
 sp_migration.o: incoming_oracle.o
+
+sp_pairlist_gpu.o: pair_sort.o
 
 -include $(DEPENDS)

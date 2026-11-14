@@ -16,6 +16,7 @@ module sp_pairlist_gpu_mod
 
   use iso_c_binding, only: c_loc
   use genesis_pair_host_mod
+  use genesis_pair_sort_mod
   use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_submit
 
   use sp_pairlist_str_mod
@@ -112,6 +113,10 @@ contains
     integer                   :: return_size
 
 
+    if(pair_sort_enabled())then
+      if(nproc_country/=1.or.domain%num_cell_boundary/=0) &
+        error stop 'Resident pair sorting requires one rank and no halos'
+    end if
     host_times(1)=pair_clock()
     ncell               => domain%num_cell_local
     nboundary           => domain%num_cell_boundary
@@ -283,6 +288,17 @@ contains
                                  pairlist%univ_mask2_size, univ_ncell_near )
 
     host_times(5)=pair_clock()
+    if(pair_sort_enabled())then
+      call pair_sort_build(univ_maxcell,ncell_local,univ_ncell_near,max_natom,max_load, &
+                           pairlist%univ_ncell_nonzero,univ_ix_natom,univ_iy_natom, &
+                           pairlist%univ_ij_load,pairlist%univ_ij_sort_list)
+      if(.not.pair_sort_verify())then
+        deallocate(index,count)
+        host_times(6)=pair_clock()
+        call pair_report(host_times)
+        return
+      end if
+    end if
     ! Sort pairlist
     !
     !$omp parallel default(shared) &
@@ -331,6 +347,9 @@ contains
       pairlist%univ_ij_sort_list(index(id_load)) = univ_ij
     end do
 
+    if(pair_sort_enabled().and.pair_sort_verify()) &
+      call pair_sort_check(univ_maxcell,pairlist%univ_ncell_nonzero, &
+                           pairlist%univ_ij_load,pairlist%univ_ij_sort_list)
     deallocate(index, count)
     host_times(6)=pair_clock()
     call pair_report(host_times)

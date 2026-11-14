@@ -18,6 +18,36 @@ dense masks. Set `GENESIS_EXCLUSION_RESET=1` on the existing one-rank CHARMM
 GPU-mask path with domain mode 6 and no halos. The optimized run preset
 enables it; setting it to 0 retains the original full initialization.
 
+Pair-list work estimates and stable descending sorting also stay on the
+GPU with `GENESIS_PAIR_SORT=1` (enabled by the optimized preset). The old
+CPU algorithm and transfers remain available with flag 0. This requires
+one rank and no halos on the existing GPU pair-list/nonbond path.
+
+Build **345739**, matched unprofiled **345756**, two runs per arm on one
+exclusive B200, seed 734381, 6,000 steps: parent 345704/new-disabled/
+GPU-sort dynamics **15.7965/15.7815/15.6635 s**; candidate total 17.6055 s.
+This saves **0.133 s / 0.84%** against the matched parent, removing about
+117 MB of host/device count/index traffic per 600 steps. GPU sorting takes
+~4.4 ms versus ~23 ms CPU calculation; GPU pair-list construction remains
+~51 ms per 600 steps. These scopes are not additive whole-run savings.
+
+Full **345755** passes 1,001 exact sort keys/count/stable-order comparisons,
+all 1,001 exact exclusion/GPU-consumer checks, 6,002 force and energy/virial
+checks and all existing migration/thermostat/COM/coordinate oracles. Max
+normalized force/energy-virial errors: 5.917e-5/5.852e-4 (pass ≤1), finite
+observables, no reported invalid/divide-by-zero/overflow. Separate 345744
+passes with CPU counts/keys/order poisoned at all 101 short-run rebuilds.
+Frozen initial/evolved 345757 passes the unchanged investigated-startup
+policy and controls. All 77 previous GPU kernels retain identical PTX;
+ten CUDA C++ objects match between performance/check builds. The existing
+strict integration-state caveat remains unresolved.
+
+`GENESIS_PAIR_SORT_VERIFY=1` runs the original CPU algorithm from downloaded
+counts and compares all active results byte for byte. The optimized
+verification preset enables it. `GENESIS_PAIR_SORT_POISON=1` separately
+checks the production path without valid CPU mirrors. Details and theory:
+companion `report/genesis-domain-tuning/PAIR_SORT_RESIDENCY.md`.
+
 ## Build and run
 
 On RIKYU:
