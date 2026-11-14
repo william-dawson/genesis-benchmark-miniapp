@@ -14,6 +14,9 @@
 
 module sp_energy_pme_noopt_2dalltoall_mod
 
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+  use iso_c_binding, only: c_ptr, c_loc, c_int, c_double
+#endif
   use sp_boundary_str_mod
   use sp_enefunc_str_mod
   use sp_energy_str_mod
@@ -116,6 +119,26 @@ module sp_energy_pme_noopt_2dalltoall_mod
   public  :: pme_pre_noopt_2dalltoall_lj
   public  :: pme_recip_noopt_2dalltoall
   public  :: pme_recip_noopt_2dalltoall_lj
+
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+  integer, external :: genesis_pme_gpu_enabled, genesis_pme_gpu_raw
+  integer, external :: genesis_pme_gpu_parallel_clear
+  real(dp), external :: genesis_pme_gpu_wall_time
+  interface
+    subroutine genesis_pme_host_clear(ncell, stride, first, force) bind(c)
+      import :: c_int, c_ptr
+      integer(c_int), intent(in) :: ncell, stride, first
+      type(c_ptr), value :: force
+    end subroutine
+    subroutine genesis_pme_gpu_recip_raw(ncell, stride, natom, coord, charge, force, result) &
+        bind(c, name='genesis_pme_gpu_recip_')
+      import :: c_int, c_double, c_ptr
+      integer(c_int), intent(in) :: ncell, stride
+      type(c_ptr), value :: natom, coord, charge, force
+      real(c_double), intent(out) :: result(4)
+    end subroutine
+  end interface
+#endif
 
 contains
 
@@ -494,6 +517,10 @@ contains
     if (.not. allocated(f)) &
       return 
 
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+    if (genesis_pme_gpu_enabled() /= 0) call genesis_pme_gpu_release()
+#endif
+
     !$omp parallel private(dealloc_stat)
     deallocate(f, bsc, bscd, stat = dealloc_stat)
     if (dealloc_stat /= 0) call error_msg_dealloc
@@ -554,6 +581,28 @@ contains
 
     vol_fact2 = 2.0_wp * PI * el_fact * box_inv(1)*box_inv(2)*box_inv(3)
     vol_fact4 = 2.0_wp * vol_fact2
+
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+    if (genesis_pme_gpu_enabled() /= 0) then
+      if (n_bs /= 4 .or. nproc_city /= nprocx*nprocy*nprocz) &
+        call error_msg('GPU PME requires order 4 and the full city communicator')
+      call genesis_pme_gpu_prepare(ngrid, ngridmax, b2, box, alpha, el_fact, bs_fact3, bs_fact3d, &
+                                   my_xy_rank, nprocx*nprocy, my_z_rank, nprocz, nproc_city, mpi_comm_city)
+    ! Calculating self energy
+    !
+    u_self_no2 = 0.0_dp
+
+    do i = 1, domain%num_cell_local
+      do ix = 1, domain%num_atom(i)
+        u_self_no2 = u_self_no2 + domain%charge(ix,i)*domain%charge(ix,i)
+      end do
+    end do
+
+    u_self_no2 = - u_self_no2 * el_fact * alpha/sqrt(PI)
+
+      return
+    end if
+#endif
 
     nix = (nlocalx1-1) / nprocy
     nix1 = nix + 1
@@ -919,11 +968,14 @@ contains
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
-    real(wip),               intent(inout) :: force(:,:,:)
+    real(wip), target,       intent(inout) :: force(:,:,:)
     real(dp),                intent(inout) :: virial(3,3,nthread)
     real(dp),                intent(inout) :: eelec(nthread)
 
     ! local variables
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+    real(dp) :: gpu_result(4), gpu_begin, gpu_elapsed
+#endif
     real(wp)                 :: elec_temp
     real(wp)                 :: vr(3), dv(3), grid(3), half_grid(3)
     real(wp)                 :: bsc_tmp(3,n_bs), bscd_tmp(3,n_bs)
@@ -946,6 +998,40 @@ contains
     real(wp),        pointer :: charge(:,:)
     integer,         pointer :: natom(:)
 
+
+#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+    if (genesis_pme_gpu_enabled() /= 0) then
+      if (n_bs /= 4 .or. nproc_city /= nprocx*nprocy*nprocz) &
+        call error_msg('GPU PME requires order 4 and the full city communicator')
+      if (size(force,1) /= 3 .or. size(force,2) /= MaxAtom) &
+        call error_msg('GPU PME force layout mismatch')
+      gpu_begin = genesis_pme_gpu_wall_time()
+      if (genesis_pme_gpu_parallel_clear() /= 0) then
+        if (.not. is_contiguous(force)) call error_msg('GPU PME clear buffer is not contiguous')
+        call genesis_pme_host_clear(size(force,3), MaxAtom, domain%num_cell_local+1, c_loc(force))
+      else
+        force(:,:,domain%num_cell_local+1:) = 0.0_wip
+      end if
+      gpu_elapsed = genesis_pme_gpu_wall_time() - gpu_begin
+      call genesis_pme_gpu_clear_time(gpu_elapsed)
+      gpu_begin = genesis_pme_gpu_wall_time()
+      if (genesis_pme_gpu_raw() /= 0) then
+        if (.not. is_contiguous(force)) call error_msg('GPU PME raw force buffer is not contiguous')
+        call genesis_pme_gpu_recip_raw(domain%num_cell_local, MaxAtom, c_loc(domain%num_atom), &
+                                      c_loc(domain%coord), c_loc(domain%charge), c_loc(force), gpu_result)
+      else
+        call genesis_pme_gpu_recip(domain%num_cell_local, MaxAtom, domain%num_atom, &
+                                   domain%coord, domain%charge, force, gpu_result)
+      end if
+      gpu_elapsed = genesis_pme_gpu_wall_time() - gpu_begin
+      call genesis_pme_gpu_fortran_time(gpu_elapsed)
+      eelec(1) = eelec(1) + gpu_result(1)
+      virial(1,1,1) = virial(1,1,1) + gpu_result(2)
+      virial(2,2,1) = virial(2,2,1) + gpu_result(3)
+      virial(3,3,1) = virial(3,3,1) + gpu_result(4)
+      return
+    end if
+#endif
 
     coord  => domain%coord
     charge => domain%charge

@@ -14,6 +14,10 @@
 #endif
 
 module sp_energy_mod
+#ifdef USE_GPU
+  use force_assembly_mod
+  use bonded_force_mod
+#endif
 
   use sp_energy_table_linear_mod
   use sp_energy_14_notable_mod
@@ -1072,6 +1076,9 @@ contains
       end if
 
     else
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
       !$omp parallel do
       do id = 1, nthread
         force_omp(1:3,1:natom,1:ncell,id) = 0.0_wp
@@ -1083,6 +1090,9 @@ contains
         force_pbc(i,1,1,1) = 0.0_wp
       end do
       !$omp end parallel do
+#ifdef USE_GPU
+      end if
+#endif
     end if
 
     virial_omp    (1:3,1:3,1:nthread) = 0.0_dp 
@@ -1135,17 +1145,36 @@ contains
 
     if (real_calc) then
 
-      ! bond energy
+#ifdef USE_GPU
+    if(bonded_enabled()) call bonded_prepare(domain,enefunc,pairlist,coord,coord_pbc,atmcls_pbc,virial_omp,ebond_omp,eangle_omp,eurey_omp,edihed_omp,eimprop_omp,elec_omp,evdw_omp)
+#endif
+    ! bond energy
       !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
       call compute_energy_bond( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, ebond_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
       ! angle energy
       !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
       call compute_energy_angle( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, eangle_omp, eurey_omp)
+
+#ifdef USE_GPU
+      end if
+#endif
 
       ! dihedral energies
       !
@@ -1155,32 +1184,64 @@ contains
                               domain, enefunc, coord,                &
                               force_omp, virial_omp, edihed_omp)
         else
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
           call compute_energy_dihed( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, edihed_omp)
+#ifdef USE_GPU
+      end if
+#endif
+
         end if
 
       end if
 
       ! improper energy
       !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
       call compute_energy_improp( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, eimprop_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
       ! 1-4 interaction 
       !
       if (enefunc%pme_use) then
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
 
         call compute_energy_nonbond14_table_linear( &
                               domain, enefunc, atmcls_pbc,           &
                               coord_pbc, force_omp, force_pbc,       &
                               virial_omp, elec_omp, evdw_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
+
         call pme_bond_corr_linear( &
                               domain, enefunc, atmcls_pbc,           &
                               coord_pbc, force_omp, force_pbc,       &
                               virial_omp, evdw_omp, elec_omp)
+
+#ifdef USE_GPU
+      end if
+#endif
 
       end if
 
@@ -1205,6 +1266,9 @@ contains
 
       end if
 
+#ifdef USE_GPU
+    if(bonded_enabled()) call bonded_finish(domain,virial_omp,ebond_omp,eangle_omp,eurey_omp,edihed_omp,eimprop_omp,elec_omp,evdw_omp)
+#endif
     ! finish GPU
     !
     if (domain%nonbond_kernel == NBK_GPU .and. enefunc%pme_use) then
@@ -1293,6 +1357,11 @@ contains
       !$omp end parallel
 
     else if (domain%nonbond_kernel == NBK_GPU) then
+#ifdef USE_GPU
+      if(force_assembly_enabled()) then
+        call force_assembly_run(domain,force_omp,force_pbc,force_long,merge_force,force)
+      else
+#endif
 
       !$omp parallel default(shared) private(id, i, ix, force_tmp, ic, k, start_i)
 #ifdef OMP
@@ -1323,6 +1392,9 @@ contains
       end do
       !$omp end parallel
 
+#ifdef USE_GPU
+      end if
+#endif
     else if (domain%nonbond_kernel == NBK_Fugaku) then
 
       !$omp parallel default(shared) private(id, i, ix, k, ic, force_tmp) 
@@ -2811,6 +2883,9 @@ contains
         end do
       end if
     else
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
       !$omp do
       do id = 1, nthread
         force_omp(1:3,1:natom,1:ncell,id) = 0.0_wp
@@ -2824,6 +2899,9 @@ contains
         force_pbc(i,1,1,1) = 0.0_wp
       end do
       !$omp end do
+#ifdef USE_GPU
+      end if
+#endif
     end if
 
     !$omp do
@@ -2878,17 +2956,36 @@ contains
 
     end select
 
+#ifdef USE_GPU
+    if(bonded_enabled()) call bonded_prepare(domain,enefunc,pairlist,coord,coord_pbc,atmcls_pbc,virial_omp,ebond_omp,eangle_omp,eurey_omp,edihed_omp,eimprop_omp,elec_omp,evdw_omp)
+#endif
     ! bond energy
     !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
     call compute_energy_bond( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, ebond_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
     ! angle energy
     !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
     call compute_energy_angle( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, eangle_omp, eurey_omp)
+
+#ifdef USE_GPU
+      end if
+#endif
 
     ! dihedral energy
     !
@@ -2900,29 +2997,61 @@ contains
 
     else
 
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
+
       call compute_energy_dihed( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, edihed_omp)
+
+#ifdef USE_GPU
+      end if
+#endif
 
     end if
 
     ! improper energy
     !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
     call compute_energy_improp( &
                               domain, enefunc, coord, force_omp,     &
                               virial_omp, eimprop_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
     ! 1-4 interaction with linear table
     !
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
     call compute_energy_nonbond14_table_linear( &
                               domain, enefunc, atmcls_pbc,           &
                               coord_pbc, force_omp, force_pbc,       &
                               virial_omp, elec_omp, evdw_omp)
 
+#ifdef USE_GPU
+      end if
+#endif
+
+#ifdef USE_GPU
+      if(bonded_cpu_reference()) then
+#endif
+
     call pme_bond_corr_linear( &
                               domain, enefunc, atmcls_pbc,           &
                               coord_pbc, force_omp, force_pbc,       &
                               virial_omp, evdw_omp, elec_omp)
+
+#ifdef USE_GPU
+      end if
+#endif
 
     if (enefunc%use_efield) &
       call compute_energy_efield( &
@@ -2940,6 +3069,9 @@ contains
                               energy%rmsd, energy%restraint_distance,&
                               energy%restraint_emfit, energy%emcorr)
 
+#ifdef USE_GPU
+    if(bonded_enabled()) call bonded_finish(domain,virial_omp,ebond_omp,eangle_omp,eurey_omp,edihed_omp,eimprop_omp,elec_omp,evdw_omp)
+#endif
     ! finish GPU
     !
     if (domain%nonbond_kernel == NBK_GPU .and. enefunc%pme_use) then
@@ -2982,6 +3114,11 @@ contains
       !$omp end parallel
    
     else if (domain%nonbond_kernel == NBK_GPU) then
+#ifdef USE_GPU
+      if(force_assembly_enabled()) then
+        call force_assembly_run(domain,force_omp,force_pbc,domain%force_long,.false.,force)
+      else
+#endif
 
       !$omp parallel default(shared) private(id, i, ix, force_tmp, ic, k, start_i)
 #ifdef OMP
@@ -3009,6 +3146,9 @@ contains
       end do
       !$omp end parallel
 
+#ifdef USE_GPU
+      end if
+#endif
     else if (domain%nonbond_kernel == NBK_Fugaku) then
 
       !$omp parallel default(shared) private(id, i, k, ix, ki, force_tmp, ic)

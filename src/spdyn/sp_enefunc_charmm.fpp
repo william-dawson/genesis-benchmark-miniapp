@@ -14,6 +14,10 @@
 #endif
 
 module sp_enefunc_charmm_mod
+  use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_reset, pair_sparse_record
+
+  use iso_c_binding, only: c_loc
+  use genesis_domain_masks_mod, only: domain_mask_mode, domain_fill_masks
 
   use sp_enefunc_localres_mod
   use sp_enefunc_restraints_mod
@@ -1875,6 +1879,8 @@ contains
     integer                  :: ic, j, ih, ij, index(4)
     integer                  :: num_excl, num_nb14, id, omp_get_thread_num
     integer                  :: found1, found2
+    logical :: sparse_recording
+    integer                  :: mask_mode
     integer                  :: fkind
     integer                  :: list1, list2
 
@@ -1952,6 +1958,13 @@ contains
     end do
     domain%num_atom_domain = ij
 
+    sparse_recording=pair_sparse_enabled()
+    if (sparse_recording) call pair_sparse_reset()
+    mask_mode = domain_mask_mode()
+    if (mask_mode /= 0) &
+      call domain_fill_masks(MaxAtom, ncell_local, maxcell_near, natom, cell_pair, &
+                             c_loc(exclusion_mask1), c_loc(exclusion_mask), mask_mode)
+
     ! exclude 1-2 interaction
     !
     !$omp parallel default(shared)                                     &
@@ -1965,11 +1978,13 @@ contains
     id = 0
 #endif
 
+    if (mask_mode == 0) then
     do i = id+1, ncell_local, nthread
       k = natom(i)
       exclusion_mask1(1:k,1:k,i) = 1
       do i1 = 1, k
         exclusion_mask1(i1,i1,i) = 0
+        if (sparse_recording) call pair_sparse_record(i1,i1,i,.true.)
       end do
     end do
     do ij = id+1, maxcell_near, nthread
@@ -1978,6 +1993,7 @@ contains
       i1 = max(natom(i),natom(j))
       exclusion_mask(1:i1,1:i1,ij) = 1
     end do
+    end if
     !$omp barrier
 
     if (enefunc%excl_level > 0) then
@@ -2013,16 +2029,20 @@ contains
               icel  = cell_pairlist2(icel1,icel2)
               if (icel1 < icel2) then
                 exclusion_mask(i2,i1,icel) = 0
+                if (sparse_recording) call pair_sparse_record(i2,i1,icel,.false.)
               else if (icel1 > icel2) then
                 exclusion_mask(i1,i2,icel) = 0
+                if (sparse_recording) call pair_sparse_record(i1,i2,icel,.false.)
               end if
   
             else
 
               if (i1 < i2) then
                 exclusion_mask1(i2,i1,i) = 0
+                if (sparse_recording) call pair_sparse_record(i2,i1,i,.true.)
               else if (i1 > i2) then
                 exclusion_mask1(i1,i2,i) = 0
+                if (sparse_recording) call pair_sparse_record(i1,i2,i,.true.)
               end if
 
             end if
@@ -2061,6 +2081,7 @@ contains
                   nonb_excl_list(4,num_excl,icel) = i2
                 end if
                 exclusion_mask1(i2,i1,icel) = 0
+                if (sparse_recording) call pair_sparse_record(i2,i1,icel,.true.)
               end do
 
             end do
@@ -2105,11 +2126,13 @@ contains
                   nonb_excl_list(4,num_excl,icel) = index(i2)
                 end if
                 exclusion_mask1(index(i2),index(i1),icel) = 0
+                if (sparse_recording) call pair_sparse_record(index(i2),index(i1),icel,.true.)
               end do
             end do
             i1 = 1
             do i2 = 2, 4
               exclusion_mask1(index(i2),index(i1),icel) = 0
+              if (sparse_recording) call pair_sparse_record(index(i2),index(i1),icel,.true.)
             end do
 
           end do
@@ -2164,9 +2187,12 @@ contains
             end if
 
             exclusion_mask1(index(2),index(1),icel) = 0
+            if (sparse_recording) call pair_sparse_record(index(2),index(1),icel,.true.)
             exclusion_mask1(index(3),index(1),icel) = 0
+            if (sparse_recording) call pair_sparse_record(index(3),index(1),icel,.true.)
             exclusion_mask1(index(3),index(2),icel) = 0
 
+            if (sparse_recording) call pair_sparse_record(index(3),index(2),icel,.true.)
           end do
         end do
 
@@ -2211,6 +2237,7 @@ contains
                     end if
                   end if
                   exclusion_mask(i2,i1,icel) = 0
+                  if (sparse_recording) call pair_sparse_record(i2,i1,icel,.false.)
                 end if
 
               else if (icel1 > icel2) then
@@ -2232,6 +2259,7 @@ contains
                     end if
                   end if
                   exclusion_mask(i1,i2,icel) = 0
+                  if (sparse_recording) call pair_sparse_record(i1,i2,icel,.false.)
                 end if
 
               end if
@@ -2257,6 +2285,7 @@ contains
                     end if
                   end if
                   exclusion_mask1(i2,i1,i) = 0
+                  if (sparse_recording) call pair_sparse_record(i2,i1,i,.true.)
                 end if
 
               else if (i1 > i2) then
@@ -2278,6 +2307,7 @@ contains
                     end if
                   end if
                   exclusion_mask1(i1,i2,i) = 0
+                  if (sparse_recording) call pair_sparse_record(i1,i2,i,.true.)
                 end if
 
               end if
@@ -2350,6 +2380,7 @@ contains
                       int(enefunc%dihe_periodicity(ix,i) &
                           / enefunc%notation_14types)
                     exclusion_mask(i2,i1,icel) = 0
+                    if (sparse_recording) call pair_sparse_record(i2,i1,icel,.false.)
                   end if
 
                 else if (icel1 > icel2) then
@@ -2371,6 +2402,7 @@ contains
                       int(enefunc%dihe_periodicity(ix,i) &
                           / enefunc%notation_14types)
                     exclusion_mask(i1,i2,icel) = 0
+                    if (sparse_recording) call pair_sparse_record(i1,i2,icel,.false.)
                   end if
 
                 end if
@@ -2396,6 +2428,7 @@ contains
                       int(enefunc%dihe_periodicity(ix,i) &
                           / enefunc%notation_14types)
                     exclusion_mask1(i2,i1,i) = 0
+                    if (sparse_recording) call pair_sparse_record(i2,i1,i,.true.)
                   end if
 
                 else if (i1 > i2) then
@@ -2417,6 +2450,7 @@ contains
                       int(enefunc%dihe_periodicity(ix,i) &
                           / enefunc%notation_14types)
                     exclusion_mask1(i1,i2,i) = 0
+                    if (sparse_recording) call pair_sparse_record(i1,i2,i,.true.)
                   end if
 
                 end if

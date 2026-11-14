@@ -13,6 +13,9 @@
 #endif
 
 module sp_energy_nonbond_gpu_mod
+#ifdef USE_GPU
+  use coordinate_pack_mod,only:coordinate_cpu_required,coordinate_require_host_c
+#endif
 
   use sp_pairlist_str_mod
   use sp_enefunc_str_mod
@@ -154,6 +157,7 @@ contains
     univ_update         =  pairlist%univ_update
 
     ij = domain%num_atom_domain
+    call coordinate_require_host_c()
     !$omp parallel do private(i,ix,ixx,start_i)
     do i = 1, ncell
       start_i = start_atom(i)
@@ -610,6 +614,7 @@ contains
     univ_update         =  pairlist%univ_update
 
     ij = domain%num_atom_domain
+    if(coordinate_cpu_required(npt,cpu_calc)) then
     !$omp parallel do private(i,ix,start_i)
     do i = 1, ncell
       start_i = start_atom(i)
@@ -620,6 +625,7 @@ contains
       end do
     end do
     !$omp end parallel do
+    end if
 
     !  launch GPU kernels (data transfer from CPU to GPU as well)
     !

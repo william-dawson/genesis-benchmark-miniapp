@@ -33,6 +33,7 @@ module sp_enefunc_mod
   use fileio_grotop_mod
   use fileio_prmtop_mod
   use fileio_par_mod
+  use maintenance_probe_mod
   use timers_mod
   use messages_mod
   use mpi_parallel_mod
@@ -207,64 +208,94 @@ contains
 
     ! bond
     !
+    call maintenance_probe_begin(18)
     call update_outgoing_enefunc_bond(domain, enefunc)
+    call maintenance_probe_end(18)
 
     ! angle
     !
+    call maintenance_probe_begin(19)
     call update_outgoing_enefunc_angl(domain, enefunc)
+    call maintenance_probe_end(19)
 
     ! dihedral
     !
+    call maintenance_probe_begin(20)
     call update_outgoing_enefunc_dihe(domain, enefunc)
+    call maintenance_probe_end(20)
 
     ! Ryckaert-Bellemans dihedral
     !
+    call maintenance_probe_begin(21)
     call update_outgoing_enefunc_rb_dihe(domain, enefunc)
+    call maintenance_probe_end(21)
 
     ! improper dihedral
     !
+    call maintenance_probe_begin(22)
     call update_outgoing_enefunc_impr(domain, enefunc)
+    call maintenance_probe_end(22)
 
     ! restraint
     !
+    call maintenance_probe_begin(23)
     call update_outgoing_enefunc_restraint(domain, enefunc)
+    call maintenance_probe_end(23)
 
     ! fitting
     !
+    call maintenance_probe_begin(24)
     call update_outgoing_enefunc_fitting(domain, enefunc)
+    call maintenance_probe_end(24)
 
     ! communicate neighbour domain
     !
+    call maintenance_probe_begin(25)
     call communicate_bond(domain, comm, enefunc)
+    call maintenance_probe_end(25)
 
 
     ! bond
     !
+    call maintenance_probe_begin(26)
     call update_incoming_enefunc_bond(domain, enefunc)
+    call maintenance_probe_end(26)
 
     ! angle
     !
+    call maintenance_probe_begin(27)
     call update_incoming_enefunc_angl(domain, enefunc)
+    call maintenance_probe_end(27)
 
     ! dihedral
     !
+    call maintenance_probe_begin(28)
     call update_incoming_enefunc_dihe(domain, enefunc)
+    call maintenance_probe_end(28)
 
     ! Ryckaert-Bellemans dihedral
     !
+    call maintenance_probe_begin(29)
     call update_incoming_enefunc_rb_dihe(domain, enefunc)
+    call maintenance_probe_end(29)
 
     ! improper dihedral
     !
+    call maintenance_probe_begin(30)
     call update_incoming_enefunc_impr(domain, enefunc)
+    call maintenance_probe_end(30)
 
     ! restraint
     !
+    call maintenance_probe_begin(31)
     call update_incoming_enefunc_restraint(domain, enefunc)
+    call maintenance_probe_end(31)
 
     ! fitting
     !
+    call maintenance_probe_begin(32)
     call update_incoming_enefunc_fitting(domain, enefunc)
+    call maintenance_probe_end(32)
 
     ! re-count nonbond exclusion list
     !
@@ -273,11 +304,15 @@ contains
 
     if (constraints%rigid_bond) then
 
+    call maintenance_probe_begin(33)
       call count_nonb_excl(first, .true., constraints, domain, enefunc)
+    call maintenance_probe_end(33)
 
     else
 
+    call maintenance_probe_begin(33)
       call count_nonb_excl(first, .false., constraints, domain, enefunc)
+    call maintenance_probe_end(33)
 
     end if
 

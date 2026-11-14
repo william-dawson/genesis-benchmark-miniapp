@@ -14,6 +14,11 @@
 #endif
 
 module sp_md_respa_mod
+#ifdef USE_GPU
+  use force_assembly_mod,only:force_resident_set,force_resident_active
+  use coordinate_pack_mod,only:coordinate_active
+  use genesis_step_state_mod
+#endif
 
   use sp_output_mod
   use sp_update_domain_mod
@@ -34,6 +39,7 @@ module sp_md_respa_mod
   use random_mod
   use math_libs_mod
   use messages_mod
+  use maintenance_probe_mod
   use timers_mod
   use mpi_parallel_mod
   use constants_mod
@@ -171,6 +177,12 @@ contains
                             domain%inv_mass,        &
                             iseed,                  &
                             domain%velocity)
+#ifdef USE_GPU
+    if(step_enabled()) then
+      call step_sync(domain)
+      call step_forget()
+    end if
+#endif
 
       call stop_translation(domain%num_cell_local,         &
                             domain%num_atom,               &
@@ -196,7 +208,13 @@ contains
                             force_long, force_omp, force_pbc,            &
                             virial_cell, virial, virial_long, virial_extern)
   
+#ifdef USE_GPU
+      if(.not.force_resident_active()) then
+#endif
         call communicate_force(domain, comm, force_short)
+#ifdef USE_GPU
+      end if
+#endif
         call communicate_force(domain, comm, force_long)
 
         if (constraints%water_type == TIP4) then
@@ -211,6 +229,8 @@ contains
     end if
 
     call mpi_barrier(mpi_comm_country, ierror)
+    call maintenance_probe_reset()
+    call maintenance_probe_begin(1)
     Timt=0.0d0
     Timb=0.0d0
     mpi_tot_tran=0.d0
@@ -227,6 +247,13 @@ contains
       ! output trajectory and restart data
       !
       if (i > istart) then
+#ifdef USE_GPU
+    if(step_output_due(dynamics,dynvars%step)) then
+    if(step_enabled()) then
+      call step_sync(domain)
+    end if
+    end if
+#endif
         call output_md(output, dynamics, boundary, pairlist, ensemble, &
                        constraints, dynvars, domain, enefunc)
       end if
@@ -254,6 +281,11 @@ contains
         call timer(TimerIntegrator, TimerOff)
 
         if (mod(istep-1, dynamics%eneout_period) == 0 .and. istep > istart) then
+#ifdef USE_GPU
+    if(step_enabled()) then
+      call step_sync(domain)
+    end if
+#endif
           call compute_dynvars(enefunc, dynamics, boundary, ensemble, domain, &
                                dynvars)
           call output_dynvars (output, enefunc, dynvars, ensemble)
@@ -263,11 +295,21 @@ contains
         !
         if (dynamics%stoptr_period > 0) then
           if (mod(istep-1,dynamics%stoptr_period) == 0) then
+#ifdef USE_GPU
+    if(.not.step_stop_translation(domain,dynamics%stop_com_translation)) then
+    if(step_enabled()) then
+      call step_sync(domain)
+      call step_forget()
+    end if
+#endif
               call stop_translation(domain%num_cell_local,         &
                                     domain%num_atom,               &
                                     dynamics%stop_com_translation, &
                                     domain%mass,                   &
                                     domain%velocity)
+#ifdef USE_GPU
+    end if
+#endif
           end if
         end if
 
@@ -275,6 +317,14 @@ contains
         !
         if (dynamics%nbupdate_period > 0 .and. &
             j == multistep .and. i > istart) then
+#ifdef USE_GPU
+    if(mod(istep,dynamics%nbupdate_period)==0) then
+    if(step_enabled()) then
+      call step_sync(domain)
+      call step_forget(.true.)
+    end if
+    end if
+#endif
 
             call domain_interaction_update(istep, dynamics%nbupdate_period,     &
                                          domain, enefunc, pairlist, boundary, &
@@ -294,11 +344,22 @@ contains
         call timer(TimerIntegrator, TimerOn)
         call timer(TimerComm1, TimerOn)
 
+#ifdef USE_GPU
+        if(coordinate_active()) then
+          if(any(comm%num_cell/=0)) error stop 'Resident coordinate communication has nonempty cells'
+        else
+#endif
         call communicate_coor(domain, comm)
+#ifdef USE_GPU
+        end if
+#endif
 
         call timer(TimerComm1, TimerOff)
         call timer(TimerIntegrator, TimerOff)
 
+#ifdef USE_GPU
+        call force_resident_set(step_candidate2(ensemble,domain,constraints))
+#endif
         if (j < multistep) then
 
           pairlist%univ_update = 0
@@ -319,7 +380,13 @@ contains
           call timer(TimerIntegrator, TimerOn)
           call timer(TimerComm2, TimerOn)
 
+#ifdef USE_GPU
+      if(.not.force_resident_active()) then
+#endif
           call communicate_force(domain, comm, force_short)
+#ifdef USE_GPU
+      end if
+#endif
 
           if (constraints%water_type == TIP4) &
             call water_force_redistribution(constraints, domain, force_short, &
@@ -354,7 +421,13 @@ contains
           call timer(TimerComm2, TimerOn)
 
           call communicate_force(domain, comm, force_long)
+#ifdef USE_GPU
+      if(.not.force_resident_active()) then
+#endif
           call communicate_force(domain, comm, force_short)
+#ifdef USE_GPU
+      end if
+#endif
 
           if (constraints%water_type == TIP4) then
             call water_force_redistribution(constraints, domain, &
@@ -376,6 +449,8 @@ contains
 
     end do
 
+    call maintenance_probe_end(1)
+    call maintenance_probe_dump()
     ! for final output
     !
     dynvars%time = dynamics%timestep * real(iend,dp)
@@ -383,6 +458,13 @@ contains
 
     ! output trajectory(t + dt) and restart data
     !
+#ifdef USE_GPU
+    if(step_output_due(dynamics,dynvars%step)) then
+    if(step_enabled()) then
+      call step_sync(domain)
+    end if
+    end if
+#endif
     call output_md(output, dynamics, boundary, pairlist, ensemble, &
                    constraints, dynvars, domain, enefunc)
 
@@ -392,6 +474,11 @@ contains
     call coord_vel_ref(domain, dynvars)
     if (ensemble%tpcontrol == TpcontrolNHC) &
       dynvars%nh_velocity(1:5) = dynvars%nh_velocity_ref(1:5) 
+#ifdef USE_GPU
+    if(step_enabled()) then
+      call step_sync(domain)
+    end if
+#endif
 
     call compute_dynvars(enefunc, dynamics, boundary, ensemble, domain, &
                          dynvars)
@@ -536,7 +623,13 @@ contains
                         force_long, force_omp, force_pbc,               &
                         virial_cell, virial, virial_long, virial_extern)
 
+#ifdef USE_GPU
+      if(.not.force_resident_active()) then
+#endif
     call communicate_force(domain, comm, force_short)
+#ifdef USE_GPU
+      end if
+#endif
     call communicate_force(domain, comm, force_long)
     if (constraints%water_type == TIP4) then
       call water_force_redistribution(constraints, domain, &
@@ -660,6 +753,30 @@ contains
 
 
 
+    real(8):: step_expected_virial(3,3)
+
+#ifdef USE_GPU
+    if(step_thermo_candidate(dynamics,istep,istart,ensemble,domain,constraints)) then
+      call mtk_barostat_vv1(dynamics,istep,istart,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars, &
+        gpu_control=.true.)
+      return
+    end if
+    if(step_candidate1(dynamics,istep,ensemble,domain,constraints)) then
+      if(step_verify()) then
+        call step_check_begin(domain,constraints,boundary)
+        call mtk_barostat_vv1(dynamics,istep,istart,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+        step_expected_virial=dynvars%virial_const
+        call step_check_reference(domain,boundary)
+      end if
+      call step_run1(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+      if(step_verify()) call step_check1_finish(domain,constraints,boundary,dynvars%virial_const,step_expected_virial)
+      return
+    end if
+    if(step_enabled()) then
+      call step_sync(domain,step_candidate2(ensemble,domain,constraints))
+      call step_forget()
+    end if
+#endif
     ! select ensemble, thermostat and barostat
     !
     if (.not. ensemble%group_tp .and. constraints%rigid_bond) &
@@ -751,6 +868,19 @@ contains
     real(wip):: dt_therm
 
 
+#ifdef USE_GPU
+    if(step_candidate2(ensemble,domain,constraints)) then
+      if(step_verify()) then
+        call step_force2(dynamics,istep,domain,constraints)
+        call step_check_begin(domain,constraints,boundary)
+        call mtk_barostat_vv2(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+        call step_check_reference(domain,boundary)
+      end if
+      call step_run2(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+      if(step_verify()) call step_check_finish(domain,constraints,boundary)
+      return
+    end if
+#endif
     dt_therm = dt_short * real(dynamics%thermo_period,wip)
 
     select case (ensemble%ensemble)
@@ -2538,7 +2668,7 @@ contains
 
   subroutine mtk_barostat_vv1(dynamics, istep, istart, dt_long, dt_short, &
                               ensemble, domain, constraints,      &
-                              boundary, dynvars)
+                              boundary, dynvars, gpu_control)
 
     ! formal arguments
     type(s_dynamics),         intent(in)    :: dynamics
@@ -2551,6 +2681,10 @@ contains
     type(s_constraints),      intent(inout) :: constraints
     type(s_boundary),         intent(inout) :: boundary
     type(s_dynvars),  target, intent(inout) :: dynvars
+
+    logical,optional,intent(in)::gpu_control
+    logical::on_gpu
+    real(8)::thermo_values(9)
 
     ! local variables
     logical                  :: calc_thermostat, calc_barostat
@@ -2587,6 +2721,9 @@ contains
     real(wip),       pointer :: bmoment(:)
     integer,         pointer :: natom(:), nwater(:), water_list(:,:,:)
 
+
+    on_gpu=.false.
+    if(present(gpu_control)) on_gpu=gpu_control
 
     dt          =  dt_short
     inv_dt      =  1.0_wip/dt
@@ -2665,7 +2802,15 @@ contains
     ! refereence
     !
     bmoment_ref(1:3) = bmoment(1:3)
+#ifdef USE_GPU
+      if(on_gpu) then
+        call step_thermo_begin(domain,constraints)
+      else
+#endif
     call copy_coord_vel(ncell, natom, coord, vel, coord_ref, vel_ref)
+#ifdef USE_GPU
+      end if
+#endif
 
     ! From here, last part of VV2
     !
@@ -2680,8 +2825,16 @@ contains
       vel_scale(1:3) = exp(-scale_b(1:3)*half_dt_long)
 
       if (ensemble%group_tp) then
+#ifdef USE_GPU
+      if(on_gpu) then
+        call step_thermo_scale(domain,constraints,vel_scale)
+      else
+#endif
         call update_vel_group_3d(constraints, ncell, nwater, water_list, &
                                  vel_scale, mass, vel)
+#ifdef USE_GPU
+      end if
+#endif
       else
         !$omp parallel do private(j,jx)
         do j = 1, ncell
@@ -2698,6 +2851,14 @@ contains
 
     if (calc_thermostat) then
 
+#ifdef USE_GPU
+      if(on_gpu) then
+        call step_thermo_stats(domain,constraints,half_dt,thermo_values)
+        kin_half(1:3)=thermo_values(1:3);kin_full(1:3)=thermo_values(4:6)
+        ekin_half=0.5_dp*(kin_half(1)+kin_half(2)+kin_half(3))
+        ekin_full=0.5_dp*(kin_full(1)+kin_full(2)+kin_full(3))
+      else
+#endif
       !$omp parallel do private(j, jx, factor)
       do j = 1, ncell
         do jx = 1, natom(j)
@@ -2722,6 +2883,9 @@ contains
         call calc_kinetic(ncell, natom, mass, vel     , kin_full, ekin_full)
       end if
 
+#ifdef USE_GPU
+      end if
+#endif
       ekin = ekin_full + 2.0_dp*ekin_half/3.0_dp
       ekin = ekin + 0.5_dp*pmass*dot_product(bmoment(1:3),bmoment(1:3))
    
@@ -2740,8 +2904,16 @@ contains
       end if
 
       if (ensemble%group_tp) then
+#ifdef USE_GPU
+      if(on_gpu) then
+        call step_thermo_scale(domain,constraints,[scale_vel,scale_vel,scale_vel])
+      else
+#endif
         call update_vel_group(constraints, ncell, nwater, water_list, &
                               scale_vel, mass, vel)
+#ifdef USE_GPU
+      end if
+#endif
       else
         !$omp parallel do private(j,jx)
         do j = 1, ncell
@@ -2769,8 +2941,18 @@ contains
       virial(1:3,1:3) = virial(1:3,1:3) + virial_long(1:3,1:3)
       if (ensemble%group_tp) then
         viri_group(1:3,1:3) = 0.0_dp
+#ifdef USE_GPU
+      if(on_gpu) then
+        viri_group(1,1)=thermo_values(7)
+        viri_group(2,2)=thermo_values(8)
+        viri_group(3,3)=thermo_values(9)
+      else
+#endif
         call compute_virial_group(constraints, ncell, nwater, water_list, &
                                   mass, coord_ref, force, viri_group)
+#ifdef USE_GPU
+      end if
+#endif
         virial_sum(1) = virial(1,1) + viri_group(1,1)
         virial_sum(2) = virial(2,2) + viri_group(2,2)
         virial_sum(3) = virial(3,3) + viri_group(3,3)
@@ -2821,8 +3003,16 @@ contains
       end if
 
       if (ensemble%group_tp) then
+#ifdef USE_GPU
+      if(on_gpu) then
+        call step_thermo_scale(domain,constraints,[scale_vel,scale_vel,scale_vel])
+      else
+#endif
         call update_vel_group(constraints, ncell, nwater, water_list, &
                               scale_vel, mass, vel)
+#ifdef USE_GPU
+      end if
+#endif
       else
         !$omp parallel do private(j, jx)
         do j = 1, ncell
@@ -2843,6 +3033,12 @@ contains
 
     end if
  
+#ifdef USE_GPU
+    if(on_gpu) then
+      call step_run1(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars,.true.)
+      return
+    end if
+#endif
     ! VV1 (long range force)
     !
     if (calc_elec_long) then

@@ -14,6 +14,10 @@
 
 module sp_pairlist_gpu_mod
 
+  use iso_c_binding, only: c_loc
+  use genesis_pair_host_mod
+  use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_submit
+
   use sp_pairlist_str_mod
   use sp_enefunc_str_mod
   use sp_domain_str_mod
@@ -104,9 +108,11 @@ contains
     integer                   :: univ_ix_num(MaxAtom), univ_iy_num(MaxAtom)
 
     integer                   :: pack_univ_mask2_size
+    real(8) :: host_times(6)
     integer                   :: return_size
 
 
+    host_times(1)=pair_clock()
     ncell               => domain%num_cell_local
     nboundary           => domain%num_cell_boundary
     natom               => domain%num_atom
@@ -210,6 +216,22 @@ contains
          ncell_bound, ncell_max, univ_maxcell, univ_maxcell1, pairdist2,     &
          cutoffdist2, system_size(1), system_size(2), system_size(3))
 
+    host_times(2)=pair_clock()
+    if (pair_sparse_enabled()) then
+      host_times(3)=pair_clock()
+      call gpu_allocate_packdata(pairlist%pack_univ_mask2,pairlist%univ_mask2_size,univ_ncell_near)
+      call pair_sparse_submit(max_natom,pairlist%univ_mask2_size,ncell_local,univ_ncell_near,univ_cell_pairlist1)
+      call gpu_sparse_download(pairlist%univ_mask2,pairlist%pack_univ_mask2, &
+                               pairlist%univ_mask2_size*univ_ncell_near)
+      call pair_verify_fill(MaxAtom,pairlist%univ_mask2_size,max_natom,ncell_local,univ_ncell_near,natom, &
+                            univ_cell_pairlist1,c_loc(exclusion_mask1),c_loc(exclusion_mask),c_loc(pairlist%univ_mask2))
+      call pair_verify_pack(c_loc(pairlist%univ_mask2),c_loc(pairlist%pack_univ_mask2),1, &
+                            pairlist%univ_mask2_size*univ_ncell_near,pairlist%pack_univ_mask2_size,.true.)
+    else
+    if (iand(pair_mode(),5)/=0) then
+      call pair_fill(MaxAtom,pairlist%univ_mask2_size,max_natom,ncell_local,univ_ncell_near,natom, &
+                     univ_cell_pairlist1,c_loc(exclusion_mask1),c_loc(exclusion_mask),c_loc(pairlist%univ_mask2))
+    else
     ! Initialization of mask on CPU
     !
     !$omp parallel default(shared) private(id, univ_ij, ij, i, j, ix, iy, idx)
@@ -242,6 +264,11 @@ contains
     end do
     !$omp end parallel
 
+    end if
+    call pair_verify_fill(MaxAtom,pairlist%univ_mask2_size,max_natom,ncell_local,univ_ncell_near,natom, &
+                          univ_cell_pairlist1,c_loc(exclusion_mask1),c_loc(exclusion_mask),c_loc(pairlist%univ_mask2))
+    host_times(3)=pair_clock()
+
     call gpu_allocate_packdata(pairlist%pack_univ_mask2, &
                                pairlist%univ_mask2_size, univ_ncell_near)
     call send_mask_data(pairlist%univ_mask2, pairlist%univ_mask2_size, &
@@ -249,10 +276,13 @@ contains
                         univ_ncell_near,                        &
                         pairlist%pack_univ_mask2)
 
+    end if
+    host_times(4)=pair_clock()
     call gpu_wait_build_pairlist(univ_ix_list, univ_iy_list, univ_ix_natom, &
                                  univ_iy_natom, pairlist%univ_mask2,        &
                                  pairlist%univ_mask2_size, univ_ncell_near )
 
+    host_times(5)=pair_clock()
     ! Sort pairlist
     !
     !$omp parallel default(shared) &
@@ -302,6 +332,8 @@ contains
     end do
 
     deallocate(index, count)
+    host_times(6)=pair_clock()
+    call pair_report(host_times)
 
 #endif
 
@@ -326,11 +358,11 @@ contains
                             pack_univ_mask2_size, &
                             univ_ncell_near, pack_univ_mask2)
 
-    integer(1), intent(in)    :: univ_mask2(*)
+    integer(1), target, intent(in)    :: univ_mask2(*)
     integer,    intent(in)    :: univ_mask2_size
     integer,    intent(in)    :: pack_univ_mask2_size
     integer,    intent(in)    :: univ_ncell_near
-    integer(1), intent(inout) :: pack_univ_mask2(*)
+    integer(1), target, intent(inout) :: pack_univ_mask2(*)
 
     integer                   :: all_size
     integer                   :: div_index
@@ -340,11 +372,23 @@ contains
     div_index = int(all_size/2/8)*8
 
 #ifdef USE_GPU
+    if (btest(pair_mode(),1)) then
+      call pair_pack(c_loc(univ_mask2),c_loc(pack_univ_mask2),1,div_index,pack_univ_mask2_size)
+    else
     call pack_mask_data(univ_mask2,           1, div_index, pack_univ_mask2)
+    end if
+    call pair_verify_pack(c_loc(univ_mask2),c_loc(pack_univ_mask2),1,div_index, &
+                          pack_univ_mask2_size,.false.)
     call gpu_copy_mask2(pack_univ_mask2, univ_mask2_size, univ_ncell_near, &
                         0, div_index/8-1, 1)
 
+    if (btest(pair_mode(),1)) then
+      call pair_pack(c_loc(univ_mask2),c_loc(pack_univ_mask2),div_index+1,all_size,pack_univ_mask2_size)
+    else
     call pack_mask_data(univ_mask2, div_index+1,  all_size, pack_univ_mask2)
+    end if
+    call pair_verify_pack(c_loc(univ_mask2),c_loc(pack_univ_mask2),div_index+1,all_size, &
+                          pack_univ_mask2_size,.true.)
     call gpu_copy_mask2(pack_univ_mask2, univ_mask2_size, univ_ncell_near, &
                         div_index/8, pack_univ_mask2_size-1, 2)
 #endif

@@ -25,6 +25,7 @@ module sp_update_domain_mod
   use sp_pairlist_str_mod
   use sp_enefunc_str_mod
   use sp_domain_str_mod
+  use maintenance_probe_mod
   use timers_mod
   use messages_mod
   use mpi_parallel_mod
@@ -71,6 +72,7 @@ contains
     integer                  :: ncell, nb, water_atom
 
 
+    call maintenance_probe_begin(17)
     ncell = domain%num_cell_local
     nb    = domain%num_cell_boundary
     pairlist%univ_update = 0
@@ -101,49 +103,82 @@ contains
 
       if (istep == update_period) then
 
+    call maintenance_probe_begin(2)
         call alloc_domain(domain, DomainPtlMove, ncell+nb, ncell, 1)
+    call maintenance_probe_end(2)
+    call maintenance_probe_begin(2)
         call alloc_domain(domain, DomainWaterMove, ncell+nb, ncell, &
                           water_atom)
+    call maintenance_probe_end(2)
 
+    call maintenance_probe_begin(3)
         call alloc_constraints(constraints, ConstraintsHGroupMove, &
                                constraints%connect, ncell+nb)
+    call maintenance_probe_end(3)
 
+    call maintenance_probe_begin(4)
         call alloc_enefunc(enefunc, EneFuncBondCell, ncell, ncell+nb)
+    call maintenance_probe_end(4)
 
       end if
 
       call timer(TimerUpdate, TimerOn)
+    call maintenance_probe_begin(5)
       call update_outgoing_atom (boundary, constraints, domain)
+    call maintenance_probe_end(5)
+    call maintenance_probe_begin(6)
       call update_outgoing_HGr  (boundary, constraints, domain)
+    call maintenance_probe_end(6)
+    call maintenance_probe_begin(7)
       call update_outgoing_water(water_atom, boundary, domain)
+    call maintenance_probe_end(7)
 
       call timer(TimerComm3, TimerOn)
+    call maintenance_probe_begin(8)
       call communicate_constraints(domain, comm, constraints)
+    call maintenance_probe_end(8)
       call timer(TimerComm3, TimerOff)
 
+    call maintenance_probe_begin(9)
       call update_incoming_atom (constraints, domain)
+    call maintenance_probe_end(9)
+    call maintenance_probe_begin(10)
       call update_incoming_HGr  (constraints, domain)
+    call maintenance_probe_end(10)
+    call maintenance_probe_begin(11)
       call update_incoming_water(water_atom, domain)
+    call maintenance_probe_end(11)
 
+    call maintenance_probe_begin(12)
       call update_cell_size_constraints    (domain, comm, constraints)
+    call maintenance_probe_end(12)
+    call maintenance_probe_begin(13)
       call update_cell_boundary(domain, comm, boundary, constraints)
+    call maintenance_probe_end(13)
 
+    call maintenance_probe_begin(14)
       call update_enefunc(domain, comm, enefunc, constraints)
+    call maintenance_probe_end(14)
 
       call timer(TimerUpdate, TimerOff)
 
       call timer(TimerPairList, TimerOn)
 
       if (enefunc%pairlist_check) then
+    call maintenance_probe_begin(15)
         call update_pairlist_pbc_check(enefunc, domain, pairlist)
+    call maintenance_probe_end(15)
       else
+    call maintenance_probe_begin(16)
         call update_pairlist_pbc(enefunc, domain, pairlist)
+    call maintenance_probe_end(16)
       end if
 
       call timer(TimerPairList, TimerOff)
 
     end if
 
+    call maintenance_probe_end(17)
     return
 
   end subroutine domain_interaction_update

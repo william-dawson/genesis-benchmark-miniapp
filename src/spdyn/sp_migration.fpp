@@ -13,6 +13,11 @@
 #endif
 
 module sp_migration_mod
+  use incoming_oracle_mod
+#ifdef USE_GPU
+  use hgr_migration_mod
+  use water_migration_mod
+#endif
 
   use sp_constraints_str_mod
   use sp_boundary_str_mod
@@ -212,7 +217,23 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_outgoing_water(water_atom, boundary, domain)
+  subroutine update_outgoing_water(water_atom,boundary,domain)
+    integer,intent(in)::water_atom
+    type(s_boundary),target,intent(in)::boundary
+    type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(water_outgoing(water_atom,boundary,domain)) then
+      if(water_verify_c()==1) then
+        call update_outgoing_water_cpu(water_atom,boundary,domain)
+        call water_check(domain)
+      end if
+      return
+    end if
+#endif
+    call update_outgoing_water_cpu(water_atom,boundary,domain)
+  end subroutine update_outgoing_water
+
+  subroutine update_outgoing_water_cpu(water_atom, boundary, domain)
 
     ! formal arguments
     integer,                  intent(in)    :: water_atom
@@ -375,7 +396,7 @@ contains
 
     return
 
-  end subroutine update_outgoing_water
+  end subroutine update_outgoing_water_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -388,7 +409,23 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_outgoing_HGr(boundary, constraints, domain)
+  subroutine update_outgoing_HGr(boundary,constraints,domain)
+    type(s_boundary),target,intent(in)::boundary
+    type(s_constraints),target,intent(inout)::constraints
+    type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(hgr_outgoing(boundary,constraints,domain))then
+      if(hgr_verify_c()==1)then
+        call update_outgoing_HGr_serial(boundary,constraints,domain)
+        call hgr_check(constraints)
+      end if
+      return
+    end if
+#endif
+    call update_outgoing_HGr_serial(boundary,constraints,domain)
+  end subroutine update_outgoing_HGr
+
+  subroutine update_outgoing_HGr_serial(boundary, constraints, domain)
 
     ! formal arguments
     type(s_boundary),    target, intent(in)    :: boundary
@@ -573,7 +610,7 @@ contains
 
     return
 
-  end subroutine update_outgoing_HGr
+  end subroutine update_outgoing_HGr_serial
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -750,7 +787,22 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_water(water_atom, domain)
+  subroutine update_incoming_water(water_atom,domain)
+    integer,intent(in)::water_atom
+    type(s_domain),target,intent(inout)::domain
+    if(iand(incoming_mode(),1)/=0)then
+      call update_incoming_water_parallel(water_atom,domain)
+      if(incoming_verify())then
+        call incoming_save(domain,kind=1)
+        call update_incoming_water_serial(water_atom,domain)
+        call incoming_check(domain,kind=1)
+      end if
+    else
+      call update_incoming_water_serial(water_atom,domain)
+    end if
+  end subroutine update_incoming_water
+
+  subroutine update_incoming_water_serial(water_atom, domain)
 
     ! formal arguments
     integer,                 intent(in)    :: water_atom
@@ -847,7 +899,108 @@ contains
 
     return
 
-  end subroutine update_incoming_water
+  end subroutine update_incoming_water_serial
+
+  subroutine update_incoming_water_parallel(water_atom, domain)
+
+    ! formal arguments
+    integer,                 intent(in)    :: water_atom
+    type(s_domain),  target, intent(inout) :: domain
+
+    ! local variable
+    integer                  :: i, k, iwater, jwater, ix
+
+    real(wip),       pointer :: coord(:,:,:), velocity(:,:,:)
+    real(wip),       pointer :: water_move_real(:,:,:), water_stay_real(:,:,:)
+    real(wp),        pointer :: water_charge(:), water_mass(:)
+    real(wp),        pointer :: charge(:,:)
+    real(wip),       pointer :: mass(:,:)
+    integer,         pointer :: ncel_local
+    integer,         pointer :: nsolute(:), natom(:), nwater(:)
+    integer,         pointer :: water_list(:,:,:)
+    integer,         pointer :: id_l2g(:,:)
+    integer(int2),   pointer :: id_g2l(:,:)
+    integer,         pointer :: water_move(:), water_stay(:)
+    integer,         pointer :: water_move_int(:,:,:), water_stay_int(:,:,:)
+    integer,         pointer :: water_atmcls(:), atmcls(:,:)
+
+
+    ncel_local      => domain%num_cell_local
+    nsolute         => domain%num_solute
+    nwater          => domain%num_water
+    natom           => domain%num_atom
+    water_list      => domain%water_list
+    coord           => domain%coord
+    velocity        => domain%velocity
+    charge          => domain%charge
+    mass            => domain%mass
+    atmcls          => domain%atom_cls_no
+    id_l2g          => domain%id_l2g
+    id_g2l          => domain%id_g2l
+    water_atmcls    => domain%water%atom_cls_no
+    water_charge    => domain%water%charge
+    water_mass      => domain%water%mass
+    water_move      => domain%water%move
+    water_stay      => domain%water%stay
+    water_move_real => domain%water%move_real
+    water_stay_real => domain%water%stay_real
+    water_move_int  => domain%water%move_integer
+    water_stay_int  => domain%water%stay_integer
+
+
+    !$omp parallel do private(k,iwater,jwater,ix) schedule(static)
+    do i = 1, ncel_local
+
+#ifdef DEBUG
+      if (water_stay(i)+water_move(i) > MaxWater) then
+        call error_msg('Debug: Update_Incoming_Water> water is exceed MaxWater')
+      end if
+#endif
+
+      do iwater = 1, water_stay(i)
+        do k = 1, water_atom
+          water_list(k,iwater,i) = nsolute(i) + water_atom*(iwater-1) + k
+          ix = water_list(k,iwater,i)
+
+          coord(1,ix,i)          = water_stay_real(6*(k-1)+1,iwater,i)
+          coord(2,ix,i)          = water_stay_real(6*(k-1)+2,iwater,i)
+          coord(3,ix,i)          = water_stay_real(6*(k-1)+3,iwater,i)
+          velocity(1,ix,i)       = water_stay_real(6*(k-1)+4,iwater,i)
+          velocity(2,ix,i)       = water_stay_real(6*(k-1)+5,iwater,i)
+          velocity(3,ix,i)       = water_stay_real(6*(k-1)+6,iwater,i)
+          id_l2g(ix,i)           = water_stay_int (k,iwater,i)
+          charge(ix,i)           = water_charge(k)
+          mass(ix,i)             = water_mass(k)
+          atmcls(ix,i)           = water_atmcls(k)
+        end do
+      end do
+
+      do iwater = 1, water_move(i)
+        jwater = iwater + water_stay(i)
+        do k = 1, water_atom
+          water_list(k,jwater,i) = nsolute(i) + water_atom*(jwater-1) + k
+          ix = water_list(k,jwater,i)
+          coord(1,ix,i)          = water_move_real(6*(k-1)+1,iwater,i)
+          coord(2,ix,i)          = water_move_real(6*(k-1)+2,iwater,i)
+          coord(3,ix,i)          = water_move_real(6*(k-1)+3,iwater,i)
+          velocity(1,ix,i)       = water_move_real(6*(k-1)+4,iwater,i)
+          velocity(2,ix,i)       = water_move_real(6*(k-1)+5,iwater,i)
+          velocity(3,ix,i)       = water_move_real(6*(k-1)+6,iwater,i)
+          id_l2g(ix,i)           = water_move_int (k,iwater,i)
+          charge(ix,i)           = water_charge(k)
+          mass(ix,i)             = water_mass(k)
+          atmcls(ix,i)           = water_atmcls(k)
+        end do
+      end do
+
+      nwater(i) = water_stay(i) + water_move(i)
+      natom(i)  = nsolute(i) + water_atom*nwater(i)
+    end do
+
+    !$omp end parallel do
+    return
+
+  end subroutine update_incoming_water_parallel
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -859,7 +1012,22 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_HGr(constraints, domain)
+  subroutine update_incoming_HGr(constraints,domain)
+    type(s_constraints),target,intent(inout)::constraints
+    type(s_domain),target,intent(inout)::domain
+    if(iand(incoming_mode(),2)/=0)then
+      call update_incoming_HGr_parallel(constraints,domain)
+      if(incoming_verify())then
+        call incoming_save(domain,constraints,kind=2)
+        call update_incoming_HGr_serial(constraints,domain)
+        call incoming_check(domain,constraints,kind=2)
+      end if
+    else
+      call update_incoming_HGr_serial(constraints,domain)
+    end if
+  end subroutine update_incoming_HGr
+
+  subroutine update_incoming_HGr_serial(constraints, domain)
 
     ! formal variable
     type(s_constraints), target, intent(inout)  :: constraints
@@ -976,7 +1144,128 @@ contains
 
     return
 
-  end subroutine update_incoming_HGr
+  end subroutine update_incoming_HGr_serial
+
+  subroutine update_incoming_HGr_parallel(constraints, domain)
+
+    ! formal variable
+    type(s_constraints), target, intent(inout)  :: constraints
+    type(s_domain),      target, intent(inout)  :: domain
+
+    ! local variable
+    integer                      :: i, j, k, k1, list, ix, connect
+    integer                      :: num_atom
+
+    real(wip),        pointer    :: coord(:,:,:), vel(:,:,:)
+    real(wip),        pointer    :: hgr_move_real(:,:,:,:)
+    real(wip),        pointer    :: hgr_stay_real(:,:,:,:)
+    real(wp),         pointer    :: charge(:,:)
+    real(wip),        pointer    :: mass(:,:)
+    real(wip),        pointer    :: HGr_bond_dist(:,:,:,:)
+    integer,          pointer    :: ncel_local
+    integer,          pointer    :: nsolute(:)
+    integer,          pointer    :: id_l2g(:,:), id_l2g_sol(:,:), atmcls(:,:)
+    integer(int2),    pointer    :: id_g2l(:,:)
+    integer,          pointer    :: No_HGr(:), HGr_local(:,:)
+    integer,          pointer    :: HGr_bond_list(:,:,:,:)
+    integer,          pointer    :: HGr_move(:,:), HGr_stay(:,:)
+    integer,          pointer    :: HGr_move_int(:,:,:,:), HGr_stay_int(:,:,:,:)
+
+
+    No_HGr        => constraints%no_hgr
+    HGr_local     => constraints%HGr_local
+    HGr_bond_list => constraints%HGr_bond_list
+    HGr_move      => constraints%HGr_move
+    HGr_stay      => constraints%HGr_stay
+    HGr_bond_dist => constraints%HGr_bond_dist
+    HGr_move_real => constraints%HGr_move_real
+    HGr_stay_real => constraints%HGr_stay_real
+    HGr_move_int  => constraints%HGr_move_int
+    HGr_stay_int  => constraints%HGr_stay_int
+    connect       =  constraints%connect
+
+    ncel_local    => domain%num_cell_local
+    nsolute       => domain%num_solute
+    coord         => domain%coord
+    vel           => domain%velocity
+    charge        => domain%charge
+    mass          => domain%mass
+    atmcls        => domain%atom_cls_no
+    id_l2g        => domain%id_l2g
+    id_l2g_sol    => domain%id_l2g_solute
+    id_g2l        => domain%id_g2l
+
+
+    !$omp parallel do private(j,k,k1,list,ix,num_atom) schedule(static)
+    do i = 1, ncel_local
+
+      num_atom = No_HGr(i)
+
+      do j = 1, connect
+
+#ifdef DEBUG
+        if (HGr_stay(j,i)+Hgr_move(j,i) > HGroupMax) then
+          call error_msg('Debug: Update_Incoming_HGr> HGr is exceed HGroupMax')
+        end if
+#endif
+
+        do k = 1, HGr_stay(j,i)
+          do list = 1, j+1
+            num_atom = num_atom + 1
+            HGr_bond_list(list,k,j,i) = num_atom
+            ix = num_atom
+            coord(1,ix,i)             = HGr_stay_real(9*(list-1)+1,k,j,i)
+            coord(2,ix,i)             = HGr_stay_real(9*(list-1)+2,k,j,i)
+            coord(3,ix,i)             = HGr_stay_real(9*(list-1)+3,k,j,i)
+            vel(1,ix,i)               = HGr_stay_real(9*(list-1)+4,k,j,i)
+            vel(2,ix,i)               = HGr_stay_real(9*(list-1)+5,k,j,i)
+            vel(3,ix,i)               = HGr_stay_real(9*(list-1)+6,k,j,i)
+            charge(ix,i)              = HGr_stay_real(9*(list-1)+7,k,j,i)
+            mass(ix,i)                = HGr_stay_real(9*(list-1)+8,k,j,i)
+            HGr_bond_dist(list,k,j,i) = HGr_stay_real(9*(list-1)+9,k,j,i)
+            atmcls(ix,i)              = HGr_stay_int (3*(list-1)+1,k,j,i)
+            id_l2g(ix,i)              = HGr_stay_int (3*(list-1)+2,k,j,i)
+            id_l2g_sol(ix,i)          = HGr_stay_int (3*(list-1)+3,k,j,i)
+            id_g2l(1,id_l2g_sol(ix,i))= i
+            id_g2l(2,id_l2g_sol(ix,i))= ix
+          end do
+        end do
+
+        do k = 1, HGr_move(j,i)
+          k1 = k + HGr_stay(j,i)
+          do list = 1, j+1
+            num_atom = num_atom + 1
+            HGr_bond_list(list,k1,j,i) = num_atom
+            ix = num_atom
+            coord(1,ix,i)             = HGr_move_real(9*(list-1)+1,k,j,i)
+            coord(2,ix,i)             = HGr_move_real(9*(list-1)+2,k,j,i)
+            coord(3,ix,i)             = HGr_move_real(9*(list-1)+3,k,j,i)
+            vel(1,ix,i)               = HGr_move_real(9*(list-1)+4,k,j,i)
+            vel(2,ix,i)               = HGr_move_real(9*(list-1)+5,k,j,i)
+            vel(3,ix,i)               = HGr_move_real(9*(list-1)+6,k,j,i)
+            charge(ix,i)              = HGr_move_real(9*(list-1)+7,k,j,i)
+            mass(ix,i)                = HGr_move_real(9*(list-1)+8,k,j,i)
+            HGr_bond_dist(list,k1,j,i)= HGr_move_real(9*(list-1)+9,k,j,i)
+            atmcls(ix,i)              = HGr_move_int (3*(list-1)+1,k,j,i)
+            id_l2g(ix,i)              = HGr_move_int (3*(list-1)+2,k,j,i)
+            id_l2g_sol(ix,i)          = HGr_move_int (3*(list-1)+3,k,j,i)
+            id_g2l(1,id_l2g_sol(ix,i))= i
+            id_g2l(2,id_l2g_sol(ix,i))= ix
+          end do
+        end do
+
+        HGr_local(j,i) = HGr_stay(j,i) + HGr_move(j,i)
+
+      end do
+
+      nsolute(i) = num_atom
+
+    end do
+
+    !$omp end parallel do
+    return
+
+  end subroutine update_incoming_HGr_parallel
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !

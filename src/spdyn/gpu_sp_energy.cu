@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <sys/time.h>
 #ifdef GENESIS_GPU_TIMER
 #include <time.h>
 #endif
 #include <assert.h>
 #include "gpu_common.h"
+extern "C" int genesis_coord_copy(void *,int,int,uintptr_t,int);
 
 #include "../config.h"
 #include "cuda.h"
@@ -37,6 +39,71 @@
 #define REALI double
 #define ERROR  D_ERROR
 #endif
+
+// Partition the ix loop so each cell-warp has less serial work.
+__constant__ int genesis_intra_log2 = 0;
+static int genesis_intra_tiles()
+{
+    static int tiles = 0;
+    if (tiles == 0) {
+        const char *value = getenv("GENESIS_INTRA_TILES");
+        long requested = 1;
+        if (value != NULL) {
+            char *end;
+            requested = strtol(value, &end, 10);
+            if (*end != '\0' || requested < 1 || requested > 128 ||
+                (requested & (requested - 1)) != 0) {
+                fprintf(stderr, "GENESIS_INTRA_TILES must be 1, 2, 4, 8, 16, 32, 64 or 128\n");
+                abort();
+            }
+        }
+        tiles = (int)requested;
+        int log2 = 0;
+        while ((1 << log2) < tiles) ++log2;
+        CUDA_CALL(cudaMemcpyToSymbol(genesis_intra_log2, &log2, sizeof(log2)));
+    }
+    return tiles;
+}
+
+
+static int genesis_intra_y()
+{
+    static int lanes = 0;
+    if (lanes == 0) {
+        const char *value = getenv("GENESIS_INTRA_Y");
+        long requested = 4;
+        if (value != NULL) {
+            char *end;
+            requested = strtol(value, &end, 10);
+            if (*end != '\0' || (requested != 4 && requested != 8 && requested != 16 && requested != 32)) {
+                fprintf(stderr, "GENESIS_INTRA_Y must be 4, 8, 16 or 32\n");
+                abort();
+            }
+        }
+        lanes = (int)requested;
+    }
+    return lanes;
+}
+
+
+static int genesis_inter_tiles()
+{
+    static int tiles = 0;
+    if (tiles == 0) {
+        const char *value = getenv("GENESIS_INTER_TILES");
+        long requested = 1;
+        if (value != NULL) {
+            char *end;
+            requested = strtol(value, &end, 10);
+            if (*end != '\0' || (requested != 1 && requested != 2 && requested != 4)) {
+                fprintf(stderr, "GENESIS_INTER_TILES must be 1, 2 or 4\n");
+                abort();
+            }
+        }
+        tiles = (int)requested;
+    }
+    return tiles;
+}
 
 typedef unsigned char  uchar;
 
@@ -416,7 +483,9 @@ void gpu_memcpy_h2d_energy(
     CUDA_CALL( cudaMemsetAsync( dev_force,  0, size_force, stream[0] ) );
     CUDA_CALL( cudaMemsetAsync( dev_ene_virial, 0, size_ene_virial, stream[0] ) );
 
+    if(!genesis_coord_copy(dev_coord_pbc,atom_domain,3,reinterpret_cast<uintptr_t>(stream[0]),0)) {
     CUDA_CALL( cudaMemcpyAsync( dev_coord_pbc, _coord_pbc, size_force, cudaMemcpyHostToDevice, stream[0] ) );
+    }
     CUDA_CALL( cudaEventRecord( event[0], stream[0] ) ); /* dev_coord */
 
     if ( first ) {
@@ -511,7 +580,9 @@ void gpu_memcpy_h2d_force(
     CUDA_CALL( cudaMemsetAsync( dev_ene_virial, 0, size_ene_virial, st ) );
 
     if ( flag_build_pairlist_on_GPU == 0 || update == 0 ) {
+        if(!genesis_coord_copy(dev_coord_pbc,atom_domain,3,reinterpret_cast<uintptr_t>(st),0)) {
 	CUDA_CALL( cudaMemcpyAsync( dev_coord_pbc, _coord_pbc, size_force, cudaMemcpyHostToDevice, st ) );
+        }
 	CUDA_CALL( cudaEventRecord( event[0], st ) ); /* dev_coord */
     }
 
@@ -1306,6 +1377,7 @@ __global__ void kern_compute_energy_nonbond_notable_univ__energyforce_intra_cell
 #else
 //__launch_bounds__(128,9)  // for DP
 #endif
+template <int IY>
 __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
     const REAL *_coord_pbc,          // ( 1:atom_domain, 1:4 )
     REAL *_force,                    // ( 1:atom_domain, 1:3 )
@@ -1348,8 +1420,8 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
 #undef num_thread_xy
 #undef id_thread_xx
 #undef id_thread_xy
-#define num_thread_xx 8
-#define num_thread_xy 4
+#define num_thread_xx (32 / IY)
+#define num_thread_xy IY
 #define id_thread_xx (id_thread_x / num_thread_xy)
 #define id_thread_xy (id_thread_x & (num_thread_xy - 1))
 
@@ -1358,7 +1430,9 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
     const int id_thread_y = threadIdx.y;
     REAL _force_local[3];
 
-    int index = index_s + id_thread_y + (num_thread_y * blockIdx.x);
+    const int tile_log2 = genesis_intra_log2;
+    const int tile = blockIdx.x & ((1 << tile_log2) - 1);
+    int index = index_s + id_thread_y + (num_thread_y * (blockIdx.x >> tile_log2));
     if (index > index_e)
         return;
     int univ_ij = index;
@@ -1379,7 +1453,8 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
     const int ix_nit = ((ix_max + num_thread_xx - 1) / num_thread_xx) * num_thread_xx;
     const int iy_nit = ((iy_max + num_thread_xy - 1) / num_thread_xy) * num_thread_xy;
 
-    for (int ix = id_thread_xx + 1; ix <= ix_nit; ix += num_thread_xx)
+    for (int ix = id_thread_xx + 1 + tile * num_thread_xx;
+         ix <= ix_nit; ix += num_thread_xx << tile_log2)
     {
         int ixx = ix + start_i;
         int iatmcls = 0;
@@ -1411,7 +1486,7 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
             REAL rij2;
 
             int idx = iy + (ix - 1) * univ_natom_max;
-            if (univ_mask2(idx, univ_ij) && ix <= ix_max && iy <= iy_max)
+            if (ix <= ix_max && iy <= iy_max && univ_mask2(idx, univ_ij))
             {
 
                 dij1 = rtmp1 - __ldg(&coord_pbc(iyy, 1));
@@ -1451,12 +1526,15 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
             }
         }
 
-        _force_local[0] += __shfl_xor_sync(0xffffffff, _force_local[0], 1, 32);
-        _force_local[0] += __shfl_xor_sync(0xffffffff, _force_local[0], 2, 32);
-        _force_local[1] += __shfl_xor_sync(0xffffffff, _force_local[1], 1, 32);
-        _force_local[1] += __shfl_xor_sync(0xffffffff, _force_local[1], 2, 32);
-        _force_local[2] += __shfl_xor_sync(0xffffffff, _force_local[2], 1, 32);
-        _force_local[2] += __shfl_xor_sync(0xffffffff, _force_local[2], 2, 32);
+#pragma unroll
+        for (int mask = 1; mask < IY; mask *= 2)
+            _force_local[0] += __shfl_xor_sync(0xffffffff, _force_local[0], mask, 32);
+#pragma unroll
+        for (int mask = 1; mask < IY; mask *= 2)
+            _force_local[1] += __shfl_xor_sync(0xffffffff, _force_local[1], mask, 32);
+#pragma unroll
+        for (int mask = 1; mask < IY; mask *= 2)
+            _force_local[2] += __shfl_xor_sync(0xffffffff, _force_local[2], mask, 32);
         if (id_thread_xy == 0 && ix <= ix_max)
         {
             if (force_local(1) != 0.0)
@@ -1468,7 +1546,7 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_intra_cell(
         }
     }
 
-    if (check_virial != 0 && id_thread_x < 3)
+    if (tile == 0 && check_virial != 0 && id_thread_x < 3)
     {
         int n = id_thread_x + 1;
         if (n == 1)
@@ -3248,7 +3326,7 @@ __global__ void kern_compute_energy_nonbond_table_linear_univ_energy_sum(
 #define NUM_CTA__FORCE_INTER_CELL 9
 #endif
 /* */
-//__launch_bounds__(128,NUM_CTA__FORCE_INTER_CELL)
+__launch_bounds__(128,7)
 __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
     const REAL *_coord_pbc,          // ( 1:atom_domain, 1:4 )
     REAL *_force,                    // ( 1:atom_domain, 1:3 )
@@ -3291,7 +3369,8 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
     REAL pairlistdist2,
     REAL system_x,
     REAL system_y,
-    REAL system_z)
+    REAL system_z,
+    int inter_tile_log2)
 {
 #undef num_thread_xx
 #undef num_thread_xy
@@ -3313,7 +3392,8 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
 #define force_iy_smem(X, Y) _force_iy_smem[CALIDX2((X) - 1, 3, (Y) - 1, max_iy_natom)]
     // #define coord_pbc_smem(X,Y) _warp_smem[CALIDX2((X)-1,4, (Y)-1,max_iy_natom) + (max_iy_natom*3)]
 
-    int index = index_s + id_thread_y + (num_thread_y * blockIdx.x);
+    const int tile = blockIdx.x & ((1 << inter_tile_log2) - 1);
+    int index = index_s + id_thread_y + num_thread_y * (blockIdx.x >> inter_tile_log2);
     if (index > index_e)
         return;
     int univ_ij = univ_ij_sort_list(index);
@@ -3344,7 +3424,7 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
     {
         /* far */
         //
-        for (int iiy_s = 1; iiy_s <= iy_natom; iiy_s += max_iy_natom)
+        for (int iiy_s = 1 + tile * max_iy_natom; iiy_s <= iy_natom; iiy_s += max_iy_natom << inter_tile_log2)
         { // blocking
             int iiy_e = iiy_s + max_iy_natom - 1;
             if (iiy_e > iy_natom)
@@ -3504,7 +3584,7 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
     {
         /* near */
         //
-        for (int iiy_s = 1; iiy_s <= iy_natom; iiy_s += max_iy_natom)
+        for (int iiy_s = 1 + tile * max_iy_natom; iiy_s <= iy_natom; iiy_s += max_iy_natom << inter_tile_log2)
         { // blocking
             int iiy_e = iiy_s + max_iy_natom - 1;
             if (iiy_e > iy_natom)
@@ -3565,7 +3645,10 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
                         iy = __ldg(&univ_iy_list(iiy, univ_ij));
                         iyy = start_j + iy;
                         int idx = iy + idx0;
-                        if (univ_mask2(idx, univ_ij))
+                        // Read the uploaded bit layout directly to keep exclusions compact.
+                        const size_t mask_bit = (size_t)(idx - 1) + (size_t)univ_mask2_size * (univ_ij - 1);
+                        const uint8_t mask_byte = __ldg((const uint8_t *)_univ_mask2 + (mask_bit >> 3));
+                        if ((mask_byte >> (mask_bit & 7)) & 1)
                         {
 
                             dij1 = rtmp1 - __ldg(&coord_pbc(iyy, 1));
@@ -3682,16 +3765,18 @@ __global__ void kern_compute_force_nonbond_table_linear_univ__force_inter_cell(
             _sumval[ii] += __shfl_xor_sync(0xffffffff, _sumval[ii], 16, 32);
         }
 
-        if (id_thread_x < 3)
-        {
-            int n = id_thread_x + 1;
-            if (n == 1)
-                sumval(n) *= __ldg(&cell_move(n, j, i)) * system_x;
-            if (n == 2)
-                sumval(n) *= __ldg(&cell_move(n, j, i)) * system_y;
-            if (n == 3)
-                sumval(n) *= __ldg(&cell_move(n, j, i)) * system_z;
-            ene_viri_mid(n, index) = sumval(n);
+        // Constant indices keep the three virial accumulators in registers.
+        if (id_thread_x == 0) {
+            const double value = sumval(1) * (__ldg(&cell_move(1, j, i)) * system_x);
+            if (value != 0.0) atomicAdd(&ene_viri_mid(1, index), value);
+        }
+        if (id_thread_x == 1) {
+            const double value = sumval(2) * (__ldg(&cell_move(2, j, i)) * system_y);
+            if (value != 0.0) atomicAdd(&ene_viri_mid(2, index), value);
+        }
+        if (id_thread_x == 2) {
+            const double value = sumval(3) * (__ldg(&cell_move(3, j, i)) * system_z);
+            if (value != 0.0) atomicAdd(&ene_viri_mid(3, index), value);
         }
     }
 }
@@ -5747,7 +5832,7 @@ void gpu_launch_compute_force_nonbond_table_linear_univ(
     assert( num_thread.x == 32 );
     assert( num_thread.y ==  4 );
     num_block = def_dim3;
-    num_block.x = DIVCEIL((index_e - index_s + 1), num_thread.y);
+    num_block.x = DIVCEIL((index_e - index_s + 1), num_thread.y) * genesis_intra_tiles();
 
 #ifdef GENESIS_GPU_TIMER
     cudaEvent_t ev_wait_s, ev_wait_e;
@@ -5784,7 +5869,9 @@ if (gpu_timer_print_once == 0) {
 #endif
 */
 
-    kern_compute_force_nonbond_table_linear_univ__force_intra_cell<<< num_block, num_thread, 0, stream[0] >>>(
+    switch (genesis_intra_y()) {
+    case 4:
+    kern_compute_force_nonbond_table_linear_univ__force_intra_cell<4><<< num_block, num_thread, 0, stream[0] >>>(
 	dev_coord_pbc,
 	dev_force,
         dev_ene_virial,
@@ -5820,6 +5907,122 @@ if (gpu_timer_print_once == 0) {
 	density,
 	cutoff2,
 	pairlistdist2 );
+        break;
+    case 8:
+    kern_compute_force_nonbond_table_linear_univ__force_intra_cell<8><<< num_block, num_thread, 0, stream[0] >>>(
+	dev_coord_pbc,
+	dev_force,
+        dev_ene_virial,
+        dev_ene_viri_mid,
+	dev_cell_move,
+	dev_atmcls_pbc,
+	dev_natom,
+	dev_start_atom,
+	dev_nonb_lj12,
+	dev_nonb_lj6,
+	dev_table_grad,
+	dev_univ_cell_pairlist1,
+        dev_univ_mask2,
+	dev_univ_ix_natom,
+	dev_univ_ix_list,
+        dev_univ_iy_natom,
+	dev_univ_iy_list,
+	dev_univ_ij_sort_list,
+	atom_domain,
+	MaxAtom,
+	MaxAtomCls,
+	num_atom_cls,
+	ncel_local,
+	ncel_bound,
+	ncel_max,
+	cutoff_int,
+	univ_maxcell,
+	univ_maxcell1,
+        univ_mask2_size,
+        univ_natom_max,
+	index_s, index_e,
+        check_virial,
+	density,
+	cutoff2,
+	pairlistdist2 );
+        break;
+    case 16:
+    kern_compute_force_nonbond_table_linear_univ__force_intra_cell<16><<< num_block, num_thread, 0, stream[0] >>>(
+	dev_coord_pbc,
+	dev_force,
+        dev_ene_virial,
+        dev_ene_viri_mid,
+	dev_cell_move,
+	dev_atmcls_pbc,
+	dev_natom,
+	dev_start_atom,
+	dev_nonb_lj12,
+	dev_nonb_lj6,
+	dev_table_grad,
+	dev_univ_cell_pairlist1,
+        dev_univ_mask2,
+	dev_univ_ix_natom,
+	dev_univ_ix_list,
+        dev_univ_iy_natom,
+	dev_univ_iy_list,
+	dev_univ_ij_sort_list,
+	atom_domain,
+	MaxAtom,
+	MaxAtomCls,
+	num_atom_cls,
+	ncel_local,
+	ncel_bound,
+	ncel_max,
+	cutoff_int,
+	univ_maxcell,
+	univ_maxcell1,
+        univ_mask2_size,
+        univ_natom_max,
+	index_s, index_e,
+        check_virial,
+	density,
+	cutoff2,
+	pairlistdist2 );
+        break;
+    case 32:
+    kern_compute_force_nonbond_table_linear_univ__force_intra_cell<32><<< num_block, num_thread, 0, stream[0] >>>(
+	dev_coord_pbc,
+	dev_force,
+        dev_ene_virial,
+        dev_ene_viri_mid,
+	dev_cell_move,
+	dev_atmcls_pbc,
+	dev_natom,
+	dev_start_atom,
+	dev_nonb_lj12,
+	dev_nonb_lj6,
+	dev_table_grad,
+	dev_univ_cell_pairlist1,
+        dev_univ_mask2,
+	dev_univ_ix_natom,
+	dev_univ_ix_list,
+        dev_univ_iy_natom,
+	dev_univ_iy_list,
+	dev_univ_ij_sort_list,
+	atom_domain,
+	MaxAtom,
+	MaxAtomCls,
+	num_atom_cls,
+	ncel_local,
+	ncel_bound,
+	ncel_max,
+	cutoff_int,
+	univ_maxcell,
+	univ_maxcell1,
+        univ_mask2_size,
+        univ_natom_max,
+	index_s, index_e,
+        check_virial,
+	density,
+	cutoff2,
+	pairlistdist2 );
+        break;
+    }
 
 #ifdef GENESIS_GPU_TIMER
     CUDA_CALL(cudaEventRecord(ev_intra_e, stream[0]));
@@ -5865,6 +6068,14 @@ if (gpu_timer_print_once == 0) {
 }
 #endif
 */
+    const int inter_tiles = genesis_inter_tiles();
+    const int inter_tile_log2 = inter_tiles == 4 ? 2 : inter_tiles == 2 ? 1 : 0;
+    num_block.x *= inter_tiles;
+    // Partial tiles share the existing five-field slots; clear before accumulation.
+    if (check_virial != 0 && index_e >= index_s) {
+        CUDA_CALL(cudaMemsetAsync(dev_ene_viri_mid + (size_t)(index_s - 1) * 5, 0,
+                                 (size_t)(index_e - index_s + 1) * 5 * sizeof(double), stream[0]));
+    }
     kern_compute_force_nonbond_table_linear_univ__force_inter_cell<<< num_block, num_thread, smem_size, stream[0] >>>(
 	dev_coord_pbc,
 	dev_force,
@@ -5878,7 +6089,7 @@ if (gpu_timer_print_once == 0) {
 	dev_nonb_lj6,
 	dev_table_grad,
 	dev_univ_cell_pairlist1,
-        dev_univ_mask2,
+        (const int8_t *)dev_pack_univ_mask2,
 	dev_univ_ix_natom,
 	dev_univ_ix_list,
 	dev_univ_iy_natom,
@@ -5903,7 +6114,7 @@ if (gpu_timer_print_once == 0) {
 	density,
 	cutoff2,
 	pairlistdist2,
-        system_x, system_y, system_z );
+        system_x, system_y, system_z, inter_tile_log2 );
 
 #ifdef GENESIS_GPU_TIMER
     CUDA_CALL(cudaGetLastError());
@@ -7073,6 +7284,9 @@ void gpu_wait_compute_force_nonbond_table_linear_univ_(
 /*
  *
  */
+extern "C" void genesis_pair_compact_launch(const REAL *,const int8_t *,const int *,const int *,const int *,
+    uint8_t *,uint8_t *,int *,int *,int,int,int,int,int,int,int,REAL,REAL,REAL,REAL,REAL,cudaStream_t,int);
+
 void gpu_launch_build_pairlist(
     REAL          *_coord_pbc,            // ( 1:atom_domain, 1:4 )
     const int     *_atmcls_pbc,           // ( 1:atom_domain )
@@ -7167,6 +7381,11 @@ void gpu_launch_build_pairlist(
     num_thread.y = NUM_WARP_BUILD_PAIRLIST;
     assert( MaxAtom < MAX_ATOM );
 
+    const char *compact_value=getenv("GENESIS_PAIR_COMPACT");
+    const char *verify_value=getenv("GENESIS_PAIR_COMPACT_VERIFY");
+    const bool compact=compact_value && strcmp(compact_value,"1")==0;
+    const bool verify=verify_value && strcmp(verify_value,"1")==0;
+    if(!compact || verify) {
     kern_build_pairlist<NUM_WARP_BUILD_PAIRLIST, MAX_ATOM><<< num_block, num_thread, 0, stream[0] >>>(
 	dev_coord_pbc,
 	dev_cell_move,
@@ -7187,6 +7406,27 @@ void gpu_launch_build_pairlist(
 	pairdist2,
 	cutoffdist2,
         system_x, system_y, system_z );
+    }
+    if(compact) genesis_pair_compact_launch(
+	dev_coord_pbc,
+	dev_cell_move,
+	dev_natom,
+	dev_start_atom,
+	dev_univ_cell_pairlist1,
+	dev_univ_ix_list,
+	dev_univ_iy_list,
+	dev_univ_ix_natom,
+	dev_univ_iy_natom,
+	atom_domain,
+	MaxAtom,
+	ncel_local,
+	ncel_bound,
+	ncel_max,
+	univ_maxcell,
+	univ_maxcell1,
+	pairdist2,
+	cutoffdist2,
+        system_x, system_y, system_z ,stream[0],verify);
     flag_build_pairlist_on_GPU = 1;
 }
 /* called from frotran */
@@ -7528,7 +7768,7 @@ void gpu_allocate_packdata(
             CUDA_CALL( cudaFree( dev_pack_univ_mask2 ) );
             dev_pack_univ_mask2 = NULL;
         }
-        CUDA_CALL( cudaMalloc_WN( (void**) &dev_pack_univ_mask2, size_pack_univ_mask2 ) );
+        CUDA_CALL( cudaMalloc_WN( (void**) &dev_pack_univ_mask2, size_pack_univ_mask2+3 ) );
     }
 }
 
@@ -7662,3 +7902,33 @@ void gpu_print_kernel_timer_()
 	printf("\n");
 }
 #endif
+
+extern "C" void genesis_pair_sparse_build(uint8_t *,uint8_t *,const int *,const int *,
+    const int4 *,const int *,int,int,int,int,int,cudaStream_t);
+
+extern "C" void gpu_sparse_mask_(const int4 *records,const int *inverse,
+    int count,int width,int pitch,int local,int near) {
+  genesis_pair_sparse_build(dev_pack_univ_mask2,reinterpret_cast<uint8_t *>(dev_univ_mask2),
+      dev_natom,dev_univ_cell_pairlist1,records,inverse,count,width,pitch,local,near,stream[1]);
+  CUDA_CALL(cudaEventRecord(event[1],stream[1]));
+  CUDA_CALL(cudaEventRecord(event[2],stream[1]));
+}
+
+extern "C" void *genesis_pair_sparse_staging(int);
+extern "C" void *gpu_sparse_staging_(int count) {
+  return genesis_pair_sparse_staging(count);
+}
+
+extern "C" void gpu_sparse_download_(uint8_t *dense,uint8_t *packed,const int *bytes) {
+  const char *verify=getenv("GENESIS_PAIR_VERIFY");
+  if(!verify || strcmp(verify,"1")!=0) return;
+  CUDA_CALL(cudaStreamSynchronize(stream[1]));
+  CUDA_CALL(cudaMemcpy(dense,dev_univ_mask2,*bytes,cudaMemcpyDeviceToHost));
+  CUDA_CALL(cudaMemcpy(packed,dev_pack_univ_mask2,(size_t(*bytes)+7)/8,cudaMemcpyDeviceToHost));
+}
+
+extern "C" void genesis_nonbond_force_view(void **force,void **queue) {
+    if(sizeof(REAL)!=sizeof(double))abort();
+    *force=dev_force;
+    *queue=reinterpret_cast<void*>(stream[0]);
+}

@@ -1,4 +1,8 @@
 # GENESIS-Benchmark-MiniApp
+
+The experimental `FugakuNEXT` branch contains the RIKYU GPU optimization
+snapshot. See [build, run and validation notes](OPTIMIZATION.md).
+
 ## Warning
 
 This application is intended solely for specialized benchmark testing. Because some essential computational modules have been omitted, it cannot be used to obtain physically meaningful or reliable simulation results. In addition, only conventional MD simulations can be benchmarked; enhanced sampling methods are not supported.

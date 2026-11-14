@@ -14,6 +14,7 @@ include $(top_srcdir)/src/mk/common-libonly.am
 bin_PROGRAMS = spdyn
 
 spdyn_SOURCES = \
+	domain_masks.fpp \
 	sp_domain_str.fpp \
 	sp_energy_str.fpp \
 	sp_enefunc_str.fpp \
@@ -25,10 +26,14 @@ spdyn_SOURCES = \
 	sp_dynvars_str.fpp \
 	sp_dynamics_str.fpp \
 	sp_output_str.fpp \
+	incoming_oracle.fpp \
 	sp_migration.fpp \
 	sp_communicate.fpp \
 	sp_pairlist_generic.fpp \
 	sp_pairlist_fugaku.fpp \
+	pair_sparse.fpp \
+	pair_host.fpp \
+	pair_pack.c \
 	sp_pairlist_gpu.fpp \
 	sp_pairlist.fpp \
 	sp_boundary.fpp \
@@ -71,6 +76,7 @@ spdyn_SOURCES = \
 	sp_domain.fpp \
 	sp_dynvars.fpp \
 	sp_assign_velocity.fpp \
+	maintenance_probe.fpp \
 	sp_update_domain.fpp \
 	sp_input.fpp \
 	sp_output.fpp \
@@ -84,8 +90,48 @@ spdyn_SOURCES = \
 	sp_setup_mpi.fpp 
 
 if CUDAGPU
+PME_CUFFT_LIBS = -lcufft
+STEP_CUDA_LIBS = -cuda
+gpu_thermo.o: FCFLAGS += -cuda -gpu=cc100,keep,ptxinfo,nofma
+gpu_thermo.o: sp_constraints.o sp_domain_str.o sp_constraints_str.o
+water_bindings.o: FCFLAGS += -cuda
+water_bindings.o: sp_domain_str.o sp_boundary_str.o
+gpu_step.o sp_migration.o: water_bindings.o
+hgr_bindings.o: FCFLAGS += -cuda
+hgr_bindings.o: sp_domain_str.o sp_boundary_str.o sp_constraints_str.o
+gpu_step.o sp_migration.o: hgr_bindings.o
+coord_bindings.o: FCFLAGS += -cuda
+coord_bindings.o: sp_domain_str.o
+gpu_step.o: coord_bindings.o
+bonded_force.o sp_energy_nonbond_gpu.o sp_md_respa.o: coord_bindings.o
+gpu_step.o: gpu_thermo.o
+gpu_step.o: FCFLAGS += -cuda -gpu=cc100,keep,ptxinfo,nofma
+gpu_step.o: sp_domain_str.o sp_constraints_str.o sp_dynamics_str.o sp_ensemble_str.o sp_dynvars_str.o sp_boundary_str.o sp_enefunc_str.o
+sp_md_respa.o: gpu_step.o
+gpu_step.o: force_assembly.o sp_assign_velocity.o
+force_assembly.o: sp_domain_str.o
+bonded_force.o: FCFLAGS += -cuda -gpu=cc100,keep,ptxinfo,nofma
+bonded_force.o: gpu_step.o sp_enefunc_str.o sp_energy_str.o sp_pairlist_str.o force_assembly.o
+sp_energy.o: force_assembly.o bonded_force.o
 spdyn_SOURCES += \
+	bonded_force.fpp \
+	force_assembly.fpp \
+	gpu_state_ops.cu \
+	gpu_force_assembly.cu \
+	coord_bindings.fpp \
+	gpu_coord_pack.cu \
+	hgr_bindings.fpp \
+	hgr_migration.cu \
+	water_bindings.fpp \
+	water_migration.cu \
+	gpu_thermo.fpp \
+	gpu_step.fpp \
 	gpu_sp_energy.cu \
+	gpu_pme.cu \
+	pair_sparse_gpu.cu \
+	pair_compact_gpu.cu \
+	pme_mesh_sum.fpp \
+	pme_host_pack.fpp \
 	gpu_common.h \
 	spdyn.fpp
 else
@@ -104,6 +150,8 @@ DEPENDS	= Makefile.depends
 MAINTAINERCLEANFILES = Makefile.in
 
 CLEANFILES = $(bin_PROGRAMS) $(spdyn_OBJECTS) *.f90 *~ *.mod
+
+sp_enefunc_charmm.o: domain_masks.o
 
 .fpp.o:
 if USE_NVHPC
@@ -135,9 +183,12 @@ if CUDAGPU
 	$(NVCC) $(NVCCFLAG) --ptxas-options=-v -lineinfo $*.cu
 endif
 
+sp_pairlist_gpu.o: pair_host.o pair_sparse.o
+sp_enefunc_charmm.o: pair_sparse.o
+
 spdyn$(EXEEXT) : $(spdyn_ADDLIB) $(spdyn_OBJECTS)
 	$(FC) -o spdyn $(spdyn_OBJECTS) \
-		$(spdyn_ADDLIB) $(LDFLAGS)
+		$(spdyn_ADDLIB) $(LDFLAGS) $(PME_CUFFT_LIBS) $(STEP_CUDA_LIBS)
 
 $(spdyn_ADDLIB):
 	cd ../lib; ${MAKE}
@@ -147,5 +198,10 @@ depend: clean_depend
 
 clean_depend:
 	rm -f $(DEPENDS)
+
+sp_update_domain.o sp_enefunc.o sp_md_respa.o: maintenance_probe.o
+
+incoming_oracle.o: sp_domain_str.o sp_constraints_str.o
+sp_migration.o: incoming_oracle.o
 
 -include $(DEPENDS)
