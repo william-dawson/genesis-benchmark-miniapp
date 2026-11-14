@@ -4,15 +4,19 @@ This branch contains the optimized benchmark mini-app measured on RIKYU
 B200 with NVHPC/HPC-X 26.3, one MPI rank and 32 OpenMP threads, in double
 precision. It is based on upstream commit
 `fc545c73b543bcdde9141bb2cfaa25ba1497c183` and exports production build
-345258 from the FugakuNEXT benchmarking campaign.
+345258 from the FugakuNEXT benchmarking campaign, followed by the sparse
+CPU exclusion-reset optimization in build 345704.
 
 The snapshot includes tuned CUDA nonbonded kernels; resident order-4
 NOOPT_2DALLTOALL PME using cuFFT; sparse GPU exclusion-mask construction
 and pair-list compaction; GPU bonded-force production/assembly; the resident
 VRES timestep, thermostat and coordinate producers; stable GPU outgoing
 water/constrained-group migration; and parallel CPU incoming migration.
-CPU fallbacks and opt-in diagnostic helpers remain. The next exclusion
-reset experiment is not included.
+CPU fallbacks and opt-in diagnostic helpers remain. CPU exclusion rebuilding
+restores the previous sparse zero records instead of repeatedly filling
+dense masks. Set `GENESIS_EXCLUSION_RESET=1` on the existing one-rank CHARMM
+GPU-mask path with domain mode 6 and no halos. The optimized run preset
+enables it; setting it to 0 retains the original full initialization.
 
 ## Build and run
 
@@ -123,3 +127,43 @@ checks. Maximum normalized force and energy/virial errors are
 5.979e-5 / 5.211e-4 (pass ≤1). No invalid/divide-by-zero/overflow is reported.
 The clean rebuilt binary SHA256 is
 `d626af9ee2d3e4e769d2bb5c806c3fbe3d8ad57abc992452df196dafa6a52a81`.
+
+## Sparse-history exclusion reset
+
+Build **345704** preserves all 77 GPU PTX entries. Diagnostic job 345703,
+three repeats per arm, measures **146.934→35.729 ms** per 600 steps for
+exclusion rebuilding (4.11×). Initialization/restoration itself falls
+107.827→5.267 ms. This changes CPU work only, adding no GPU transfers.
+The remaining 1–2/1–3 and 1–4 construction code retains its original order.
+
+Unprofiled job **345722**, two runs per arm, compares the published 003bbed
+binary with this build on one exclusive B200, 6,000 steps, seed 734381:
+
+| Path | Dynamics median (range), seconds | Total median, seconds |
+|---|---:|---:|
+| Published 003bbed | 17.423 (17.406–17.440) | 19.549 |
+| New build, reset off | 17.685 (17.472–17.898) | 19.6255 |
+| Sparse reset | 15.738 (15.738–15.738) | 17.6595 |
+
+The gain against the published checkpoint is **1.685 s / 9.67% dynamics**.
+The slower disabled-control repeat is retained. The full-run saving exceeds
+the directly timed exclusion leaf saving; other CPU phases also improve,
+consistent with reduced cache pollution. Do not attribute it all to reset.
+
+Independent full-length job **345727** passes **1,001 exact mask and ordered
+list/scale comparisons**, plus 1,001 GPU mask/packing and atom-set checks,
+6,002 force and energy/virial comparisons, all 1,000 events of each migration
+oracle, 999 thermostat events, 3,996 scales, 599 COM events and 5,999 exact
+coordinate checks. Maximum normalized force/energy-virial errors are
+6.070e-5 / 4.907e-4 (pass ≤1). All 100 observable rows are finite, both
+printed seeds are 734381, and no invalid/divide-by-zero/overflow is reported.
+Frozen initial/evolved gates **345723** pass the unchanged investigated
+MPI-startup policy and controls. The older strict integration-state
+acceptance caveat above remains unresolved.
+
+`GENESIS_EXCLUSION_VERIFY=1` saves candidate results, repeats the original
+dense construction, and compares active masks, counts, ordered exclusion/
+1–4 lists and scales byte for byte. `GENESIS_OPT_VERIFY=1` enables it and
+the downstream GPU-mask checks. Verification time is excluded from timing
+claims. Detailed equations, raw-result locations and figure reproduction:
+companion report `report/genesis-domain-tuning/EXCLUSION_REBUILD.md`.

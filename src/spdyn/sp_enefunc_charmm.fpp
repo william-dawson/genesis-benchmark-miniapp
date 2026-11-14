@@ -14,7 +14,9 @@
 #endif
 
 module sp_enefunc_charmm_mod
-  use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_reset, pair_sparse_record
+  use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_reset, pair_sparse_record, pair_sparse_restore
+  use exclusion_reset_mod,only:exclusion_reset_enabled,exclusion_reset_verify
+  use exclusion_oracle_mod,only:exclusion_save,exclusion_check
 
   use iso_c_binding, only: c_loc
   use genesis_domain_masks_mod, only: domain_mask_mode, domain_fill_masks
@@ -1865,9 +1867,23 @@ contains
   !======1=========2=========3=========4=========5=========6=========7=========8
 
   subroutine count_nonb_excl(first, constraint, constraints, domain, enefunc)
+    logical,intent(in)::first,constraint
+    type(s_constraints),target,intent(in)::constraints
+    type(s_domain),target,intent(inout)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+    call count_nonb_excl_core(first,constraint,constraints,domain,enefunc,.false.)
+    if(exclusion_reset_enabled().and.exclusion_reset_verify())then
+      call exclusion_save(enefunc)
+      call count_nonb_excl_core(first,constraint,constraints,domain,enefunc,.true.)
+      call exclusion_check(enefunc,MaxAtom,domain%num_cell_local,maxcell_near,domain%num_atom,domain%cell_pairlist1)
+    end if
+  end subroutine count_nonb_excl
+
+  subroutine count_nonb_excl_core(first, constraint, constraints, domain, enefunc, reference)
 
     ! formal arguments
     logical,                     intent(in)    :: first
+    logical,                     intent(in)    :: reference
     logical,                     intent(in)    :: constraint
     type(s_constraints), target, intent(in)    :: constraints
     type(s_domain),      target, intent(inout) :: domain
@@ -1959,11 +1975,22 @@ contains
     domain%num_atom_domain = ij
 
     sparse_recording=pair_sparse_enabled()
-    if (sparse_recording) call pair_sparse_reset()
     mask_mode = domain_mask_mode()
-    if (mask_mode /= 0) &
-      call domain_fill_masks(MaxAtom, ncell_local, maxcell_near, natom, cell_pair, &
-                             c_loc(exclusion_mask1), c_loc(exclusion_mask), mask_mode)
+    if(exclusion_reset_enabled().and..not.reference)then
+#ifdef USE_GPU
+      if(.not.sparse_recording.or.mask_mode/=6.or.domain%nonbond_kernel/=NBK_GPU.or. &
+         nproc_country/=1.or.domain%num_cell_boundary/=0.or.enefunc%forcefield/=ForcefieldCHARMM) &
+        error stop 'Incremental exclusion reset requires one-rank CHARMM GPU masks, mode 6 and no halos'
+      call pair_sparse_restore(MaxAtom,ncell_local,maxcell_near,c_loc(exclusion_mask1),c_loc(exclusion_mask))
+#else
+      error stop 'Incremental exclusion reset requires a GPU build'
+#endif
+    else
+      if (mask_mode /= 0) &
+        call domain_fill_masks(MaxAtom, ncell_local, maxcell_near, natom, cell_pair, &
+                               c_loc(exclusion_mask1), c_loc(exclusion_mask), mask_mode)
+    end if
+    if (sparse_recording) call pair_sparse_reset()
 
     ! exclude 1-2 interaction
     !
@@ -2522,7 +2549,7 @@ contains
 
     return
 
-  end subroutine count_nonb_excl
+  end subroutine count_nonb_excl_core
 
   subroutine check_pbc(box_size, dij, pbc_int)
 

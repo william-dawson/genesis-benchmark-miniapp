@@ -2,6 +2,7 @@
 #include "../config.h"
 #endif
 module genesis_pair_sparse_mod
+  use exclusion_reset_mod,only:exclusion_restore_masks
   use iso_c_binding, only: c_ptr, c_loc, c_int, c_f_pointer
 #ifdef OMP
   use omp_lib, only: omp_get_thread_num, omp_get_max_threads
@@ -9,6 +10,7 @@ module genesis_pair_sparse_mod
   implicit none
   private
   public :: pair_sparse_enabled, pair_sparse_reset, pair_sparse_record, pair_sparse_submit
+  public :: pair_sparse_restore
   integer, parameter :: capacity=65536
   integer, allocatable, target, save :: records(:,:,:), compact(:,:), inverse(:)
   integer, allocatable, save :: used(:,:)
@@ -25,6 +27,16 @@ module genesis_pair_sparse_mod
     end subroutine
   end interface
 contains
+  subroutine pair_sparse_restore(ld,local,near,one,inter)
+    integer,intent(in)::ld,local,near
+    type(c_ptr),value::one,inter
+    if(allocated(records))then
+      call exclusion_restore_masks(ld,local,near,one,inter,records,used)
+    else
+      call exclusion_restore_masks(ld,local,near,one,inter)
+    end if
+  end subroutine
+
   logical function pair_sparse_enabled()
     integer, save :: selected=-1
     integer :: status, code

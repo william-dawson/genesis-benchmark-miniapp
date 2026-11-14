@@ -15,6 +15,8 @@ bin_PROGRAMS = spdyn
 
 spdyn_SOURCES = \
 	domain_masks.fpp \
+	exclusion_reset.fpp \
+	exclusion_oracle.fpp \
 	sp_domain_str.fpp \
 	sp_energy_str.fpp \
 	sp_enefunc_str.fpp \
@@ -152,6 +154,9 @@ MAINTAINERCLEANFILES = Makefile.in
 CLEANFILES = $(bin_PROGRAMS) $(spdyn_OBJECTS) *.f90 *~ *.mod
 
 sp_enefunc_charmm.o: domain_masks.o
+exclusion_oracle.o: sp_enefunc_str.o
+pair_sparse.o: exclusion_reset.o
+sp_enefunc_charmm.o: exclusion_reset.o exclusion_oracle.o
 
 .fpp.o:
 if USE_NVHPC
