@@ -134,6 +134,8 @@ spdyn_SOURCES += \
 	pair_sparse_gpu.cu \
 	pair_compact_gpu.cu \
 	pair_sort_gpu.cu \
+	bonded_migration.fpp \
+	bonded_migration_gpu.cu \
 	pme_mesh_sum.fpp \
 	pme_host_pack.fpp \
 	gpu_common.h \
@@ -212,5 +214,10 @@ incoming_oracle.o: sp_domain_str.o sp_constraints_str.o
 sp_migration.o: incoming_oracle.o
 
 sp_pairlist_gpu.o: pair_sort.o
+
+if CUDAGPU
+bonded_migration.o: sp_domain_str.o sp_enefunc_str.o
+sp_migration.o: bonded_migration.o
+endif
 
 -include $(DEPENDS)

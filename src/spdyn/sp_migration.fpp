@@ -16,6 +16,7 @@ module sp_migration_mod
   use incoming_oracle_mod
 #ifdef USE_GPU
   use hgr_migration_mod
+  use bonded_migration_mod
   use water_migration_mod
 #endif
 
@@ -1299,6 +1300,12 @@ contains
     integer,         pointer :: bond_add(:), buf_int(:,:,:)
 
 
+#ifdef USE_GPU
+    if(bonded_outgoing(1,domain,enefunc))then
+      if(.not.bonded_verify())return
+    end if
+#endif
+
     ncel_local  => domain%num_cell_local
     nboundary   => domain%num_cell_boundary
     cell_pair   => domain%cell_pair
@@ -1347,6 +1354,10 @@ contains
       end do
     end do
 
+#ifdef USE_GPU
+    call bonded_check(1,enefunc)
+#endif
+
     return
 
   end subroutine update_outgoing_enefunc_bond
@@ -1381,6 +1392,10 @@ contains
     integer(1),      pointer :: bondkind(:,:)
     integer,         pointer :: bond_pbc(:,:)
 
+
+#ifdef USE_GPU
+    call bonded_update_ids(1,enefunc)
+#endif
 
     ncel_local      => domain%num_cell_local
     nboundary       => domain%num_cell_boundary
@@ -1483,6 +1498,10 @@ contains
 
     end do
 
+#ifdef USE_GPU
+    call bonded_check_ids(1,enefunc)
+#endif
+
     return
 
   end subroutine update_incoming_enefunc_bond
@@ -1519,6 +1538,12 @@ contains
     integer,         pointer :: angle_add(:), angle_exit(:)
     integer,         pointer :: angle_exit_index(:,:), buf_int(:,:,:)
 
+
+#ifdef USE_GPU
+    if(bonded_outgoing(2,domain,enefunc))then
+      if(.not.bonded_verify())return
+    end if
+#endif
 
     ncel_local       => domain%num_cell_local
     nboundary        => domain%num_cell_boundary
@@ -1580,6 +1605,10 @@ contains
       end  do
     end do
 
+#ifdef USE_GPU
+    call bonded_check(2,enefunc)
+#endif
+
     return
 
   end subroutine update_outgoing_enefunc_angl
@@ -1615,6 +1644,10 @@ contains
     integer(1),      pointer :: anglekind(:,:)
     integer,         pointer :: buf_int(:,:,:), nangle(:), anglelist(:,:,:)
     integer,         pointer :: angl_pbc(:,:,:)
+
+#ifdef USE_GPU
+    call bonded_update_ids(2,enefunc)
+#endif
 
     ncel_local       => domain%num_cell_local
     nboundary        => domain%num_cell_boundary
@@ -1737,6 +1770,10 @@ contains
 
     end do
 
+#ifdef USE_GPU
+    call bonded_check_ids(2,enefunc)
+#endif
+
     return
 
   end subroutine update_incoming_enefunc_angl
@@ -1775,6 +1812,12 @@ contains
     integer(1),      pointer :: dihekind(:,:)
     integer,         pointer :: nperiod(:,:), buf_int(:,:,:)
 
+
+#ifdef USE_GPU
+    if(bonded_outgoing(3,domain,enefunc))then
+      if(.not.bonded_verify())return
+    end if
+#endif
 
     ncel_local       => domain%num_cell_local
     nboundary        => domain%num_cell_boundary
@@ -1837,6 +1880,10 @@ contains
       end  do
     end do
 
+#ifdef USE_GPU
+    call bonded_check(3,enefunc)
+#endif
+
     return
 
   end subroutine update_outgoing_enefunc_dihe
@@ -1872,6 +1919,10 @@ contains
     integer(1),      pointer :: dihekind(:,:)
     integer,         pointer :: dihe_pbc(:,:,:)
 
+
+#ifdef USE_GPU
+    call bonded_update_ids(3,enefunc)
+#endif
 
     ncel_local       => domain%num_cell_local
     nboundary        => domain%num_cell_boundary
@@ -1993,6 +2044,10 @@ contains
       end if
 
     end do
+
+#ifdef USE_GPU
+    call bonded_check_ids(3,enefunc)
+#endif
 
     return
 

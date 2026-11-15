@@ -50,6 +50,41 @@ companion `report/genesis-domain-tuning/PAIR_SORT_RESIDENCY.md`.
 
 ## Build and run
 
+Build **346414** adds cached GPU outgoing bonded migration with
+`GENESIS_BONDED_MIGRATION_GPU=1` (enabled by the optimized preset; flag0
+retains the original CPU routines). It batches bonds, angles and dihedral
+terms, caches fixed parameters by unique interaction ID, and performs
+classification, stable compaction/sorting and payload gathering on GPU.
+CPU scatter and incoming payload updates remain; the private identity grid
+follows the original incoming permutation. Scope: one-rank, no active halos,
+fixed-topology CHARMM double precision on the existing GPU path.
+
+Final matched **346423**, four/arm, 6,000 steps, seed 734381: disabled/GPU
+dynamics **15.7615→15.5760 s**, saving **0.1855 s / 1.18%**; total
+17.7125→17.5430 s. GPU calculation is ~2.7 ms/600 versus ~44 ms for the
+old outgoing CPU scan/packing, excluding transfers, scatter and first-use
+cache costs. The comparable complete outgoing+incoming diagnostic falls
+58.356→48.753 ms/600. No large application speedup is claimed.
+
+Full correctness **346421** passes all 1,000 exact outgoing payload/order
+and incoming identity/conservation events for each of the three kinds,
+6,002 force and energy/virial checks, and all existing migration,
+thermostat, COM, coordinate, exclusion and pair-sort gates. Max normalized
+force/energy-virial errors are6.589e-5/4.641e-4 (pass≤1); observables finite,
+seed 734381, no reported invalid/divide-by-zero/overflow. Frozen initial/
+evolved **346422** passes the unchanged investigated-startup policy and
+controls. Existing strict integration-state acceptance caveat remains.
+All84 prior PTX entries and shared CUB bodies stay unchanged; all 11 CUDA
+C++ objects match between production/check builds. New classification/
+gather kernels have no stack/local traffic after explicit descriptor
+selection. Detailed equations, failed prototypes, phase attribution,
+PTX/counters and reproduction: companion
+`report/genesis-domain-tuning/BONDED_MIGRATION.md`.
+
+`GENESIS_BONDED_MIGRATION_VERIFY=1` enables exact outgoing and incoming-ID
+checks; `GENESIS_OPT_VERIFY=1` includes them in the preset. Verification
+runtime is excluded from throughput claims.
+
 On RIKYU:
 
 ```bash
