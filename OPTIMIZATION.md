@@ -1,5 +1,221 @@
 # Experimental RIKYU optimization snapshot
 
+Latest unprofiled timing for build351026 (one B200, one MPI rank x32 CPU
+threads, double ApoA1,92,224atoms,6,000steps): four-run medians are13.553s
+total and11.645s dynamics; a separate four-run confirmation gives13.5325s
+and11.6295s. These application timers overlap and must not be summed.
+
+An exclusive partition of trace351040's540warm steps (1,158.279ms) gives
+65.5% GPU kernels active,3.6% copies/clears without kernels, and30.9% GPU
+idle. Idle time is9.3% in copy APIs,4.2% in synchronization APIs,5.1% in
+launch/other CUDA APIs and12.3% outside CUDA APIs; this is not a measurement
+of CPU arithmetic or fully recoverable speedup. Explicit warm-window traffic
+is76.359MB host-to-device,41.171MB device-to-host and14.287GB device-to-device.
+These byte totals exclude coherent GPU stores to host metadata arrays.
+The nonbonded GPU kernels are the largest exclusive kernel family (32.0%
+of wall time); another6.1% has multiple kernel families active concurrently.
+GPU kernel tuning and the slow device-copy population are now primary
+investigations alongside measured removal of remaining host boundaries.
+
+The [accepted report, additive ledger and reproducible analysis](https://github.com/RIKEN-RCCS/block1-eeas/tree/b185d81/report/genesis-observables)
+record correctness evidence, full timing sets and the100% wall breakdown.
+
+Build **351026** keeps periodic INFO reporting resident: reduce squared
+thermostat-snapshot forces and mass-weighted pre-update reference velocities
+on GPU, return two doubles, and retain the existing scalar report formulas.
+The preset selects `GENESIS_OBSERVABLES_GPU=1`;0 keeps full report sync,
+2 compares the original CPU sums on identical inputs,3 poisons retired CPU
+reporting mirrors. Output files and startup/final/unsupported paths retain
+their old synchronization. Full351037 passes99reports/reference arm and all
+previous numerical/ownership gates; maximum relative difference2.11e-14.
+Normal/tight351052/351053 and strict frozen351051 pass; I/O351054 produces
+complete finite coordinate/velocity frames and restart files. All159old PTX
+bodies match350496; two reduction kernels are the only additions.
+Traces351039/351040 remove all81large periodic report downloads per540warm
+steps: D2H605.924→41.171MB. Full matched351038/351084 improve dynamics
+2.34%/2.29% (~0.27–0.28s per6,000steps). Evidence:
+`report/genesis-observables/README.md` in the companion knowhow repository.
+
+Build **350496** closes the maintenance coordinate/velocity round trip and
+translation-pack host handoff for the one-GPU ApoA1 path. Resident migration
+already updates the live integration allocations: keep those values, retire
+their maintenance downloads/reloads and publish only other required metadata.
+Configure coordinate packing from resident translations/charge/counts/offsets;
+retire host translation publication. Real output and fallbacks retain sync.
+The preset selects `GENESIS_STATE_CYCLE=1` /`GENESIS_PACK_RESIDENT=1`;0 keeps
+old paths,2 retains independent CPU mirrors and checks exact active values,
+3 poisons retired CPU mirrors. Production retirement excludes CPU oracles.
+Full350560 passes1,000rebuilds/arm and every original physical/ownership gate.
+Normal/tight350565/350566 and strict frozen350564 pass. All157old PTX bodies
+match350411; two new metadata publishers are the only additions.
+Traces350562/350563 remove96.48% H2D and67.44% D2H bytes per540warm steps;
+large remaining state downloads occur only at output cadence. Two interleaved
+full timing sets350561/350591 reduce dynamics4.37%/4.47%, total0.601/0.580s.
+This closes the two boundaries, not all remaining host work. Evidence:
+`report/genesis-state-translation/README.md` in the companion knowhow repository.
+
+Build **350411** replaces nine maintenance metadata uploads with direct
+HBM copies from the current incoming/boundary views. The optimized preset
+selects `GENESIS_METADATA_IMPORT=1`;0 retains uploads,2 checks every active
+field byte against CPU metadata,3 poisons device destinations before overwrite.
+The path requires the completed resident maintenance handoff; other paths
+retain their uploads. Full350418 passes1,000events in each of four arms,
+all existing force/energy/virial and ownership gates, and unchanged budgets.
+Frozen350430 passes strict initial/advanced frames. All157retained kernel
+PTX bodies match350329. Interleaved full sets350419/350434 improve dynamics
+3.15%/2.61%, saving0.430/0.345s total. Ordinary traces350427/350428 remove
+2.425GB (52.8%) of H2D traffic per540warm steps; D2H is unchanged.
+Full residency remains incomplete: next are state and translation transfers.
+Companion evidence: `report/genesis-maintenance-import/README.md`.
+
+Build **349465** retires the CPU raw nonbonded-force mirror on CHARMM
+short steps whose GPU force assembly reads the device result directly.
+`GENESIS_NONBOND_MIRROR=1` is enabled in the optimized preset; 0 retains
+downloads; 2 poisons retired mirrors and checks direct consumption.
+Actual CPU virial/reference readers keep downloads. Both full matched
+sets 349470/349478 show **0.52–0.60% shorter dynamics** against same-build
+controls (13.364→13.2945 s, 13.351→13.2705 s). First-set ranges overlap;
+net gain against the previous executable is 0.24–0.78%, so do not claim a
+large arithmetic speedup. Trace 349469 proves 300 copies / 664,012,800 B
+removed per 600 steps, H2D/D2D unchanged. Full 349472 passes 3,000 poisoned
+mirrors/direct consumers and all previous numerical/ownership gates;
+frozen 349471 passes both policies. All 97 device bodies stay identical;
+17 performance/check CUDA C++ objects match. Full-step CPU virial remains.
+Companion evidence: `report/genesis-nonbond-virial/README.md`.
+
+For integrator/constraint changes or unexplained state/constraint-virial
+differences, compare normal and 100× tighter SHAKE tolerances (1e-10 and
+1e-12 Å here), using identical inputs at each CPU/GPU operator boundary,
+fixed seed and unchanged error budgets. Keep diagnostic runs separate
+from normal-tolerance performance. Analytical SETTLE is independent of
+SHAKE tolerance; a diagnostic run finishing does not make recorded budget
+failures pass. Current check 349456 passes all position/velocity-state
+comparisons in both arms but retains 16/500 and 11/500 constraint-virial
+budget failures. Details: `report/genesis-timestep-port/current-shake-check/README.md`.
+
+Build **349387** prepares remapped GPU state before force evaluation.
+Coordinates, velocities and maps upload once, then the existing periodic
+pack publishes with unit scale. Bonded raw/periodic inputs and PME reuse
+that state; late VV2 prepare avoids a second import. Actual CPU virial/
+reference readers retain current host data. `GENESIS_REMAP_PREPARE=1`
+enables the path; 0 keeps late prepare; 2 checks active coordinates,
+velocity, translations and both packed layouts bit-for-bit, poisons packed
+GPU outputs before overwrite, and requires GPU consumers before VV2.
+
+Matched full **349392/349409**, four primary runs per arm/set, gives
+late/early dynamics **14.6040/13.3875 s** and **14.4305/13.2790 s**:
+**7.98–8.33%** dynamics and **7.28–7.61%** total gain against same-build
+controls. Previous-executable controls give net **7.3–8.2%** dynamics gain;
+confirmation's disabled arm is ~0.75% slower than its parent. Traces move
+310 copies / 1.310 GB per 600 steps from H2D to D2D, with 100 additional
+invocations of unchanged periodic packing. Full **349393** passes 1,000
+instances of all new exact/poison/consumer gates and every previous
+numerical gate. Frozen **349389** passes both policies. All 97 old PTX
+entries and 16 performance/check CUDA C++ objects match. The separate
+strict integrator-state caveat remains unresolved. Presets select 1/2.
+Companion evidence, allocation-heavy trace anomaly and full controls:
+`report/genesis-remap-prepare/README.md`.
+
+Build **349289** trims maintenance synchronization to coordinates and
+velocities. Migration does not consume the five omitted work/reference/
+force fields; GPU VV2 regenerates scratch and uses freshly published
+forces. Velocity-reference bytes remain on GPU instead of making an
+unchanged round trip. `GENESIS_MAINT_STATE=1` enables it, 0 keeps full sync,
+2 privately verifies retained reference bytes, poisons five CPU mirrors,
+checks that CPU reference fields remain unwritten and poisons GPU work
+before regeneration. Actual CPU output/fallbacks keep full state sync;
+independent integrator-state reference mode keeps the old handoff.
+
+Full matched **349331/349336**, four primary runs per arm in each set:
+full/trimmed dynamics **15.0090/14.5575 s** and **14.9695/14.5500 s**:
+**2.80–3.01%** dynamics and **2.47–2.65%** total-time reduction, saving
+**0.42–0.45 s** per 6,000 steps. Trace removes 500 D2H +100 H2D slab copies /
+4.183 GB per 600; full validated event counts imply **41.83 GB** less
+traffic. Full **349332** passes 1,000 instances of all four new ownership
+checks plus all existing numerical gates. Frozen **349327** passes both
+policies; all 97 prior PTX entries and 15 performance/check CUDA C++ objects
+match. The earlier strict integrator-state caveat remains unresolved.
+The optimized/verification presets select modes 1/2. Companion evidence:
+`report/genesis-maintenance-state/README.md`.
+
+Build **349243** retires GPU-owned translations before maintenance
+recomputes every active value, and skips translation refreshes for ordinary
+output that does not read them. `GENESIS_TRANSLATION_REBUILD=1` enables it;
+0 keeps the prior refresh path; 2 poisons old/output mirrors and compares
+all rebuilt active values bit-for-bit with the original boundary routine.
+Rebuild intervals forbid real consumers or cache configuration until
+completion. CPU fallback/reference consumers retain mirror refreshes.
+The optimized/verification presets select modes 1/2, respectively.
+
+Matched full sets **349248/349257**, four primary runs per arm per set,
+give refresh/retire dynamics medians **14.9555/14.9030 s** and
+**14.9575/14.8870 s**: **0.35–0.47%** shorter dynamics. Total median savings
+are 14/54 ms. Production traces eliminate all 109 translation downloads per
+600 steps; the full production path loses 1,099 / **7.66 GB** of downloads.
+CPU maintenance still rebuilds translations and H2D cache refill remains.
+Full **349249** passes 1,000 poisoned exact overwrite events, 99 output
+poisons, all existing numerical gates; frozen **349245** passes both policies.
+All 97 prior PTX entries remain unchanged. The separate strict integration-
+state caveat remains unresolved. Companion evidence:
+`report/genesis-translation-rebuild/README.md`.
+
+Build **349165** makes the existing GPU periodic pack the translation
+owner. `GENESIS_TRANSLATION_GPU=1` removes the duplicate CPU scaling loop;
+0 retains it; 2 compares every active update bit-for-bit with the original
+Fortran CPU scaling sequence and poisons the live host mirror. Actual
+coordinate/state downloads refresh translations, and CPU consumer/cache
+reconfiguration/invalidation boundaries reject stale mirrors. The optimized
+preset enables mode 1 and verification selects mode 2. No new kernel or
+launch is introduced; all 97 prior normalized PTX entries are unchanged.
+
+Two matched 6,000-step sets **349175/349183**, four primary runs per arm
+in each, give CPU/GPU-owned dynamics medians **15.0535/15.0015 s** and
+**15.0620/14.9905 s**: a small **0.35–0.47%** gain. Total wall-time change
+is not consistent. Refreshes add ~7.66 GB of padded D2H per full run,
+limiting the benefit. Full **349176** passes 5,999 exact scaling/host-poison
+checks, all 6,002 force/energy/virial and ordered totals, and every existing
+component gate. Frozen **349174** passes both policies. The old separate
+strict integrator-state caveat remains unresolved. Companion evidence:
+`report/genesis-translation-residency/README.md`.
+
+The separate `GENESIS_FORCE_CLEAR` experiment remains disabled (default 0):
+although correct, it did not demonstrate a whole-run gain over build 348347.
+
+Build **348347** keeps PME long forces on GPU through integration,
+removing their download, CPU scatter/clears and reupload. After one
+bootstrap handoff, PME writes the registered integrator destination
+directly. `GENESIS_LONG_FORCE=1 GENESIS_LONG_DIRECT=1` enables the path;
+long-force mode 2 checks every active value bit-for-bit against CPU scatter
+and poisons the CPU mirror. The optimized/verification presets select
+these modes. Startup, output, maintenance and state-reference fallbacks
+retain CPU mirrors; scope is the existing one-rank packed GPU PME path.
+
+Matched full **348351**, four primary runs/arm, gives same-build CPU/direct
+dynamics **15.3190→14.9935 s** (2.12%), total 17.3080→16.9550 s. Production
+trace 348356 removes 3.449 GB of host/device traffic per 600 steps. Full 348352
+passes 3,000 exact publication/poison checks and 6,002 force/energy/virial
+and ordered-total checks; frozen348354 passes strict and unchanged startup
+policy locally. All 97 prior PTX entries match, as do 13 CUDA C++ objects
+between production/check builds. The separate strict integration-state
+caveat remains. Details: companion `report/genesis-long-force-residency/README.md`.
+
+Build **348320** moves final bonded energy/virial accumulation to GPU,
+with cooperative staging preserving the CPU term/cell summation order.
+`GENESIS_BONDED_TOTALS=1` enables it; 0 retains CPU accumulation, and 2
+also checks every per-worker result bit-for-bit. The optimized preset
+enables mode1; its verification preset uses mode 2.
+`GENESIS_BONDED_TOTALS_STAGED=0` selects the first direct-load GPU helper.
+
+Matched full **348324**, four primary runs/arm, same build disabled/GPU:
+dynamics **15.5110→15.2765 s** (1.51%), total 17.4495→17.2260 s. The helper
+is 33.408→6.976 µs after staging, and removes about 438 MB of D2H traffic
+per 600 steps. Full **348325** passes 6,002 exact ordered accumulations and
+force/energy/virial shadows, plus all existing component gates. Frozen
+**348329** passes strict initial/evolved checks and the unchanged startup
+policy. All 94 pre-existing PTX entries stay unchanged. The separate strict
+integration-state caveat remains. Evidence and reproduction are in the
+companion `report/genesis-force-finalization/README.md`.
+
 This branch contains the optimized benchmark mini-app measured on RIKYU
 B200 with NVHPC/HPC-X 26.3, one MPI rank and 32 OpenMP threads, in double
 precision. It is based on upstream commit

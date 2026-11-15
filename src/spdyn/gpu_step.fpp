@@ -2,9 +2,17 @@
 #include "../config.h"
 #endif
 module genesis_step_state_mod
+  use observables_mod,only:observables_poison
+  use state_cycle_mod,only:state_cycle_begin,state_cycle_consume,state_cycle_retired
+  use metadata_import_mod,only:metadata_import
+  use final_reductions_mod
+  use remap_coordinate_mod,only:remap_allowed,remap_publish,remap_record_c,remap_consume_c
+  use maintenance_state_mod,only:maintenance_state_begin,maintenance_state_consume,maintenance_state_poison
+  use translation_residency_mod,only:translation_mode,translation_reference,translation_scaled,translation_refresh
+  use maintenance_probe_mod,only:maintenance_probe_begin,maintenance_probe_end
   use iso_c_binding,only:c_int,c_double
   use cudafor
-  use force_assembly_mod,only:force_resident_requested
+  use force_assembly_mod,only:force_resident_requested,long_force_available,long_force_active
   use sp_assign_velocity_mod,only:stop_translation
   use genesis_thermo_mod
   use coordinate_pack_mod
@@ -27,7 +35,9 @@ module genesis_step_state_mod
   private
   public :: step_thermo_candidate,step_thermo_begin,step_thermo_scale,step_thermo_stats
   public :: step_export_force_coord
+  public :: step_report
   public :: step_stop_translation
+  public :: step_prepare_remap
   public :: step_enabled, step_verify, step_candidate2, step_run2, step_sync, step_forget
   public :: step_check_begin, step_check_reference, step_check_finish
   public :: step_candidate1,step_run1,step_check1_finish,step_coords,step_output_due,step_force2
@@ -55,6 +65,12 @@ module genesis_step_state_mod
   real(8),allocatable :: saved_trans(:,:,:)
   real(8) :: saved_system(3)
   interface
+    integer(c_int) function long_copy(values,reference,width,count) bind(C,name='genesis_long_force_copy')
+      import c_int,c_double
+      real(c_double),device::values(*)
+      real(c_double),intent(inout)::reference(*)
+      integer(c_int),value::width,count
+    end function
     subroutine poison_work_c(first,second,width,count) bind(C,name='genesis_poison_work')
       import c_double,c_int
       real(c_double),device::first(*),second(*)
@@ -74,6 +90,14 @@ module genesis_step_state_mod
     end function
   end interface
 contains
+  logical function step_report(domain,dynvars) result(skip)
+    type(s_domain),intent(inout)::domain
+    type(s_dynvars),intent(in)::dynvars
+    skip=.false.
+    if(.not.resident.or..not.thermo_pending.or.nproc_country/=1.or.domain%num_cell_boundary/=0)return
+    skip=thermo_report(dvref,dmass,dnatom,dynvars%step)
+    if(skip)call observables_poison(domain)
+  end function
   logical function step_thermo_candidate(dynamics,istep,istart,ensemble,domain,constraints)
     type(s_dynamics),intent(in)::dynamics
     integer,intent(in)::istep,istart
@@ -206,7 +230,10 @@ contains
     real(8),device,intent(out)::values(:,:,:)
     integer(kind=cuda_stream_kind),intent(in)::stream
     step_export_force_coord=resident
-    if(resident) call checked(cudaMemcpyAsync(values,dx,size(dx),cudaMemcpyDeviceToDevice,stream))
+    if(resident) then
+      call checked(cudaMemcpyAsync(values,dx,size(dx),cudaMemcpyDeviceToDevice,stream))
+      call remap_record_c(3)
+    end if
   end function
   logical function step_enabled()
     integer, save :: selected=-1
@@ -289,9 +316,9 @@ contains
     end if
   end subroutine
 
-  subroutine pack_state(domain,copy_short,copy_work)
+  subroutine pack_state(domain,copy_short,copy_work,copy_long,copy_reference)
     type(s_domain), intent(in) :: domain
-    logical,intent(in)::copy_short,copy_work
+    logical,intent(in)::copy_short,copy_work,copy_long,copy_reference
     integer :: cell,atom
     !$omp parallel do private(atom) schedule(static)
     do cell=1,cells
@@ -300,19 +327,20 @@ contains
         host_state(:,atom,cell,2)=domain%coord(:,atom,cell)
         if(copy_work) host_state(:,atom,cell,3)=domain%coord_ref(:,atom,cell)
         if(copy_work) host_state(:,atom,cell,4)=domain%velocity_full(:,atom,cell)
-        host_state(:,atom,cell,5)=domain%force_long(:,atom,cell)
+        if(copy_long) host_state(:,atom,cell,5)=domain%force_long(:,atom,cell)
         if(copy_short) host_state(:,atom,cell,6)=domain%force_short(:,atom,cell)
-        host_state(:,atom,cell,7)=domain%velocity_ref(:,atom,cell)
+        if(copy_reference) host_state(:,atom,cell,7)=domain%velocity_ref(:,atom,cell)
       end do
     end do
     !$omp end parallel do
   end subroutine
 
-  subroutine prepare(domain,constraints,resident_short)
+  subroutine prepare(domain,constraints,resident_short,resident_long)
     type(s_domain), intent(in) :: domain
     type(s_constraints), intent(in) :: constraints
     logical,optional,intent(in)::resident_short
-    logical::copy_short,copy_work
+    logical,optional,intent(in)::resident_long
+    logical::copy_short,copy_work,copy_long,copy_reference
     if(resident) return
     if(cells/=0) then
       if(cells/=domain%num_cell_local.or.ld/=size(domain%coord,2)) error stop 'GPU timestep shape changed'
@@ -337,21 +365,31 @@ contains
     copy_work=.true.
     if(present(resident_short)) copy_work=.not.(resident_short.and.state_work_enabled())
     work_ready=copy_work
-    call pack_state(domain,copy_short,copy_work)
+    copy_long=.true.
+    if(present(resident_long)) copy_long=.not.resident_long
+    copy_reference=.not.maintenance_state_consume(domain,dvref,dxref,dwork,ld,cells,copy_short,copy_work,copy_long)
+    if(.not.state_cycle_consume(domain,dx,dv, &
+         .not.copy_reference.and..not.copy_short.and..not.copy_work.and..not.copy_long))then
+      call pack_state(domain,copy_short,copy_work,copy_long,copy_reference)
+      dv=host_state(:,:,:,1);dx=host_state(:,:,:,2)
+    end if
     if(.not.copy_work.and.state_verify_enabled()) then
       call poison_work_c(dxref,dwork,ld,cells)
       write(*,'(a)') 'GENESIS_STATE_VERIFY: VV2 scratch inputs poisoned'
     end if
-    dv=host_state(:,:,:,1);dx=host_state(:,:,:,2)
     if(copy_work) dxref=host_state(:,:,:,3)
     if(copy_work) dwork=host_state(:,:,:,4)
-    dfl=host_state(:,:,:,5);dvref=host_state(:,:,:,7)
+    if(copy_long) dfl=host_state(:,:,:,5)
+    if(copy_reference) dvref=host_state(:,:,:,7)
     if(copy_short) dfs=host_state(:,:,:,6)
     if(.not.maps_current) then
+    if(.not.metadata_import(domain,constraints,dmass,dimass,dnatom,dnwater,dwater,dnsolute,dhlocal,dhlist,dhdist, &
+         .not.copy_reference.and..not.copy_short.and..not.copy_long.and..not.copy_work.and..not.step_verify()))then
     dmass=domain%mass(:,1:cells);dimass=domain%inv_mass(:,1:cells)
     dnatom=domain%num_atom(1:cells);dnwater=domain%num_water(1:cells);dwater=domain%water_list
     dnsolute=constraints%No_HGr(1:cells)
     dhlocal=constraints%HGr_local;dhlist=constraints%HGr_bond_list;dhdist=constraints%HGr_bond_dist
+    end if
     dcells=cells;diter=constraints%shake_iteration;dconnect=constraints%connect
     dtolerance=real(constraints%shake_tolerance,8)
     dwater_rOH=constraints%water_rOH;dwater_rHH=constraints%water_rHH
@@ -360,6 +398,17 @@ contains
     end if
     call coordinate_configure(domain,dx)
     resident=.true.
+  end subroutine
+
+  subroutine step_prepare_remap(domain,constraints)
+    type(s_domain),intent(in)::domain
+    type(s_constraints),intent(in)::constraints
+    if(.not.remap_allowed().or.step_verify()) return
+    if(.not.force_resident_requested().or..not.long_force_active().or..not.state_work_enabled()) return
+    if(.not.coordinate_enabled().or..not.coordinate_resident().or..not.coordinate_pme()) return
+    if(resident) error stop 'Remap preparation requires forgotten old state'
+    call prepare(domain,constraints,.true.,.true.)
+    call remap_publish(domain,dv)
   end subroutine
 
   subroutine step_coords(domain)
@@ -374,6 +423,7 @@ contains
       end do
     end do
     !$omp end parallel do
+    call translation_refresh(domain)
     call coordinate_host_refreshed_c()
   end subroutine
 
@@ -431,12 +481,16 @@ contains
     call checked(cudaGetLastError())
     call constraint_virial<<<(cells+127)/128,128>>>()
     call checked(cudaGetLastError())
-    host_vir=dvir;bad=failed
-    if(bad/=0) error stop 'GPU SHAKE failed to converge'
-    dynvars%virial_const=0
-    do cell=1,cells
-      dynvars%virial_const=dynvars%virial_const+host_vir(:,:,cell)
-    end do
+    if(final_reductions_enabled())then
+      call final_constraint_reduce(dvir,host_vir,dynvars%virial_const,failed)
+    else
+      host_vir=dvir;bad=failed
+      if(bad/=0) error stop 'GPU SHAKE failed to converge'
+      dynvars%virial_const=0
+      do cell=1,cells
+        dynvars%virial_const=dynvars%virial_const+host_vir(:,:,cell)
+      end do
+    end if
     dynvars%virial_const=dynvars%virial_const/(dt_short*dt_short)
     scale=exp(bmoment*dt_short)
     boundary%box_size_x=scale(1)*boundary%box_size_x_ref
@@ -445,6 +499,8 @@ contains
     boundary%cell_size_x=boundary%box_size_x/real(boundary%num_cells_x,wip)
     boundary%cell_size_y=boundary%box_size_y/real(boundary%num_cells_y,wip)
     boundary%cell_size_z=boundary%box_size_z/real(boundary%num_cells_z,wip)
+    call maintenance_probe_begin(36)
+    if(translation_mode()==0) then
     !$omp parallel do private(atom) schedule(static)
     do cell=1,cells
       do atom=1,domain%num_atom(cell)
@@ -452,9 +508,15 @@ contains
       end do
     end do
     !$omp end parallel do
+    else
+      call translation_reference(domain,scale)
+    end if
+    call maintenance_probe_end(36)
     domain%system_size=[boundary%box_size_x,boundary%box_size_y,boundary%box_size_z]
     short_force=mod(istep,dynamics%elec_long_period)/=0
+    if(translation_mode()/=0.and..not.coordinate_enabled()) error stop 'GPU translations require GPU coordinate packing'
     if(coordinate_enabled()) call coordinate_pack_c(scale(1),scale(2),scale(3),merge(1,0,short_force))
+    call translation_scaled(domain)
     download_coords=.true.
     if(coordinate_enabled().and.coordinate_resident().and.short_force) download_coords=.false.
     if(coordinate_enabled().and.coordinate_resident().and.coordinate_pme()) then
@@ -574,14 +636,19 @@ contains
     dvir(:,:,cell)=vir
   end subroutine
 
-  subroutine step_sync(domain,vv1_only)
+  subroutine step_sync(domain,vv1_only,skip_translation,maintenance)
     type(s_domain), intent(inout) :: domain
-    logical,optional,intent(in)::vv1_only
+    logical,optional,intent(in)::vv1_only,skip_translation,maintenance
     integer :: cell,atom
-    logical::copy_short,copy_work,copy_ref,trimmed
+    logical::copy_short,copy_work,copy_ref,trimmed,cut,copy_long
     integer::status
     character(16)::value
     if(.not.resident) return
+    cut=.false.
+    if(present(maintenance)) then
+      if(maintenance) cut=maintenance_state_begin(dvref,ld,cells, &
+        force_resident_requested().and.state_work_enabled().and.long_force_active().and..not.step_verify())
+    end if
     call hgr_latch_c(dx,dv,dhlist,dhlocal,dhdist,ld,cells,size(dhlist,2),size(dhlist,1),size(dhlist,3))
     call water_latch_c(dx,dv,dwater,dnwater,ld,cells,size(dwater,2))
     if(thermo_pending) call thermo_output(domain)
@@ -593,10 +660,15 @@ contains
     end if
     copy_ref=.not.trimmed
     if(trimmed) copy_work=.false.
+    copy_long=.not.cut
+    if(cut) then
+      copy_short=.false.;copy_work=.false.;copy_ref=.false.
+    end if
+    if(.not.state_cycle_begin(domain,dx,dv,cut))then
     host_state(:,:,:,1)=dv;host_state(:,:,:,2)=dx
     if(copy_work.and.copy_ref) host_state(:,:,:,3)=dxref
     if(copy_work) host_state(:,:,:,4)=dwork
-    host_state(:,:,:,5)=dfl
+    if(copy_long) host_state(:,:,:,5)=dfl
     if(copy_ref) host_state(:,:,:,7)=dvref
     if(copy_short) host_state(:,:,:,6)=dfs
     !$omp parallel do private(atom) schedule(static)
@@ -606,13 +678,20 @@ contains
         domain%coord(:,atom,cell)=host_state(:,atom,cell,2)
         if(copy_work.and.copy_ref) domain%coord_ref(:,atom,cell)=host_state(:,atom,cell,3)
         if(copy_work) domain%velocity_full(:,atom,cell)=host_state(:,atom,cell,4)
-        domain%force_long(:,atom,cell)=host_state(:,atom,cell,5)
+        if(copy_long) domain%force_long(:,atom,cell)=host_state(:,atom,cell,5)
         if(copy_short) domain%force_short(:,atom,cell)=host_state(:,atom,cell,6)
         if(copy_ref) domain%velocity_ref(:,atom,cell)=host_state(:,atom,cell,7)
       end do
     end do
     !$omp end parallel do
-    call coordinate_host_refreshed_c()
+    end if
+    if(present(skip_translation)) then
+      if(.not.skip_translation) call translation_refresh(domain)
+    else
+      call translation_refresh(domain)
+    end if
+    if(state_cycle_retired()==0) call coordinate_host_refreshed_c()
+    if(cut) call maintenance_state_poison(domain)
     if(trimmed.and.state_verify_enabled()) then
       do cell=1,cells
         domain%coord_ref(:,1:domain%num_atom(cell),cell)=ieee_value(0.0_wip,ieee_quiet_nan)
@@ -673,27 +752,33 @@ contains
   subroutine step_force2(dynamics,istep,domain,constraints)
     type(s_dynamics),intent(in)::dynamics
     integer,intent(in)::istep
-    type(s_domain),intent(in)::domain
+    type(s_domain),intent(inout)::domain
     type(s_constraints),intent(in)::constraints
     integer::cell,atom,taken
-    logical::long_step
+    logical::long_step,take_long
     thermo_pending=.false.
-    call prepare(domain,constraints,force_resident_requested())
+    long_step=mod(istep,dynamics%elec_long_period)==0
+    take_long=long_step.and.long_force_available()
+    if(long_step.and.long_force_active().and..not.take_long) error stop 'Missing PME long-force publication'
+    call remap_consume_c()
+    call prepare(domain,constraints,force_resident_requested(),take_long)
+    if(take_long) then
+      if(long_copy(dfl,domain%force_long,ld,cells)==0) error stop 'Resident long force is unavailable'
+    end if
     taken=assembly_copy(dfs,ld,cells)
     if(force_resident_requested().and.taken==0) error stop 'Resident short force is unavailable'
-    long_step=mod(istep,dynamics%elec_long_period)==0
-    if(taken==0.or.long_step) then
+    if(taken==0.or.(long_step.and..not.take_long)) then
     !$omp parallel do private(atom) schedule(static)
     do cell=1,cells
       do atom=1,domain%num_atom(cell)
         if(taken==0) host_state(:,atom,cell,6)=domain%force_short(:,atom,cell)
-        if(long_step) host_state(:,atom,cell,5)=domain%force_long(:,atom,cell)
+        if(long_step.and..not.take_long) host_state(:,atom,cell,5)=domain%force_long(:,atom,cell)
       end do
     end do
     !$omp end parallel do
     end if
     if(taken==0) dfs=host_state(:,:,:,6)
-    if(long_step) dfl=host_state(:,:,:,5)
+    if(long_step.and..not.take_long) dfl=host_state(:,:,:,5)
   end subroutine
 
   attributes(global) subroutine center_momentum(threads)

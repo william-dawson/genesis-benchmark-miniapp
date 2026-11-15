@@ -1,4 +1,7 @@
 #include <cuda_runtime.h>
+extern "C" int genesis_long_force_requested_();
+extern "C" int genesis_long_force_reference();
+extern "C" void genesis_long_force_publish(const double *,const int *,const int *,int,int,cudaStream_t);
 #include <cstdint>
 extern "C" int genesis_coord_copy(void *,int,int,std::uintptr_t,int);
 #include <cufft.h>
@@ -454,11 +457,20 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
     launch_gather<false>(s,device_coord,device_charge,*stride,atoms);
   CUDA(cudaGetLastError());
   if (measure) times[3]=wall_time();
-  CUDA(cudaMemcpyAsync(s.host_force,s.force,3*size_t(atoms)*sizeof(double),cudaMemcpyDeviceToHost,s.stream));
+  const bool resident_force=genesis_long_force_requested_()!=0;
+  if(resident_force) {
+    if(!s.packed||s.p.ranks!=1) {
+      std::fprintf(stderr,"Resident long force requires one-rank packed PME\n");std::abort();
+    }
+    genesis_long_force_publish(s.force,natom,s.host_offsets,*stride,*ncell,s.stream);
+  }
+  const bool host_force=!resident_force||genesis_long_force_reference();
+  if(host_force) CUDA(cudaMemcpyAsync(s.host_force,s.force,3*size_t(atoms)*sizeof(double),cudaMemcpyDeviceToHost,s.stream));
   CUDA(cudaMemcpyAsync(s.host_partial,s.partial,4*size_t(s.blocks)*sizeof(double),cudaMemcpyDeviceToHost,s.stream));
   if (measure) times[4]=wall_time();
   CUDA(cudaStreamSynchronize(s.stream));
   if (measure) times[5]=wall_time();
+  if(host_force) {
   if (s.packed && s.host_threads) {
     genesis_pme_host_scatter_(ncell,stride,&atoms,natom,s.host_offsets,s.host_force,force,&s.host_threads);
   } else {
@@ -466,6 +478,7 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
   for(int cell=0;cell<*ncell;++cell) {
     std::memcpy(force+3*cell*(*stride),s.host_force+3*(s.packed ? offset : cell*(*stride)),3*size_t(natom[cell])*sizeof(double));
     offset+=natom[cell];
+  }
   }
   }
   if (measure) times[6]=wall_time();

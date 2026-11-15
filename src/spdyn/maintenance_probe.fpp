@@ -2,7 +2,7 @@ module maintenance_probe_mod
   implicit none
   private
   public::maintenance_probe_begin,maintenance_probe_end,maintenance_probe_reset,maintenance_probe_dump
-  integer,parameter::stages=33
+  integer,parameter::stages=39
   character(64),parameter::names(stages)=[character(64):: &
       'production_md', &
       'alloc_domain', &
@@ -36,7 +36,13 @@ module maintenance_probe_mod
       'update_incoming_enefunc_impr', &
       'update_incoming_enefunc_restraint', &
       'update_incoming_enefunc_fitting', &
-      'count_nonb_excl']
+      'count_nonb_excl', &
+      'full_force_output_initialization', &
+      'short_force_initialization', &
+      'cpu_translation_scaling', &
+      'cpu_nonbond_coordinate_virial', &
+      'cpu_full_periodic_pack', &
+      'cpu_short_periodic_pack']
   logical,save::collect=.false.
   integer,save::depth=0,stack(32),calls(stages)=0
   real(8),save::started(32),children(32),wall(stages)=0,self(stages)=0

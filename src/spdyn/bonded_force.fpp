@@ -2,6 +2,7 @@
 #include "../config.h"
 #endif
 module bonded_force_mod
+  use force_topology_bindings_mod
   use cudafor
   use iso_c_binding
   use constants_mod
@@ -29,6 +30,23 @@ module bonded_force_mod
   real(8),allocatable,pinned::snapshot_coord(:,:,:),snapshot_pbc(:,:,:),snapshot_box(:)
   logical::first=.true.
   interface
+    integer(c_int) function pair_class_copy(values,n,stream) bind(C,name='genesis_pair_prepare_class_copy')
+      import c_int,cuda_stream_kind
+      integer(c_int),device,intent(out)::values(*)
+      integer(c_int),value::n
+      integer(kind=cuda_stream_kind),value::stream
+    end function
+    integer(c_int) function totals_mode() bind(C,name='genesis_bonded_totals_mode')
+      import c_int
+    end function
+    subroutine totals_run(bond,angle,dihedral,improper,nb14,correction,ncell,workers,stream,values) &
+        bind(C,name='genesis_bonded_totals')
+      import c_double,c_int,cuda_stream_kind
+      real(c_double),device,intent(in)::bond(*),angle(*),dihedral(*),improper(*),nb14(*),correction(*)
+      integer(c_int),value::ncell,workers
+      integer(kind=cuda_stream_kind),value::stream
+      real(c_double),intent(out)::values(*)
+    end subroutine
     subroutine register_force(values) bind(C,name='genesis_bonded_register')
       import c_double
       real(c_double),device,intent(in)::values(*)
@@ -362,37 +380,58 @@ contains
       error stop 'GPU bonded shape changed'
     previous_stream=cudaforGetDefaultStream()
     call checked(cudaforSetDefaultStream(stream=producer_stream))
+    if(first.or.pairlist%univ_update/=0)then
+      call topology_fields(1,cells,host_live_bond,capacity_bond,offset_bond,owner_bond,local_bond, &
+        d_bond_nbond,d_bond_bondlist,d_bond_bond_pbc,d_bond_bond_pbc, &
+        d_bond_r0,d_bond_fc,d_bond_r0,d_bond_r0)
+      call topology_fields(2,cells,host_live_angle,capacity_angle,offset_angle,owner_angle,local_angle, &
+        d_angle_nangle,d_angle_anglelist,d_angle_angl_pbc,d_angle_angl_pbc, &
+        d_angle_theta0,d_angle_fc,d_angle_r0_ub,d_angle_fc_ub)
+      call topology_fields(3,cells,host_live_dihed,capacity_dihed,offset_dihed,owner_dihed,local_dihed, &
+        d_dihed_ndihe,d_dihed_dihelist,d_dihed_dihe_pbc,d_dihed_nperiod, &
+        d_dihed_phase,d_dihed_fc,d_dihed_phase,d_dihed_phase)
+      call topology_fields(4,cells,host_live_improper,capacity_improper,offset_improper,owner_improper,local_improper, &
+        d_improper_nimp,d_improper_imprlist,d_improper_impr_pbc,d_improper_impr_pbc, &
+        d_improper_phase,d_improper_fc,d_improper_phase,d_improper_phase)
+      call topology_exclusion(5,cells,host_live_nb14,capacity_nb14,offset_nb14,owner_nb14,local_nb14, &
+        d_nb14_num_nb14_calc,d_nb14_start_atom,d_nb14_nb14_calc_list,d_nb14_cell_move,domain%cell_move,size(domain%cell_move,2))
+      call topology_exclusion(6,cells,host_live_corr,capacity_corr,offset_corr,owner_corr,local_corr, &
+        d_corr_num_nonb_excl,d_corr_start_atom,d_corr_nonb_excl_list,d_corr_cell_move,domain%cell_move,size(domain%cell_move,2))
+      call topology_start(producer_stream)
+    end if
     if(first.or.pairlist%univ_update/=0) then
-      g_id=domain%id_g2l;g_class=classes(1:atoms)
+      g_id=domain%id_g2l
+      if(pair_class_copy(g_class,atoms,producer_stream)==0)g_class=classes(1:atoms)
       g_atoms=atoms;g_notation=enefunc%notation_14types
-      d_bond_nbond=enefunc%num_bond
-      d_angle_nangle=enefunc%num_angle
-      d_dihed_ndihe=enefunc%num_dihedral
-      d_improper_nimp=enefunc%num_improper
+      if(topology_bypass()==0)d_bond_nbond=enefunc%num_bond
+      if(topology_bypass()==0)d_angle_nangle=enefunc%num_angle
+      if(topology_bypass()==0)d_dihed_ndihe=enefunc%num_dihedral
+      if(topology_bypass()==0)d_improper_nimp=enefunc%num_improper
       d_nb14_cutoff=enefunc%cutoffdist
       d_nb14_density=enefunc%table%density
       if(first) d_nb14_nb14_lj12=enefunc%nb14_lj12
       if(first) d_nb14_nb14_lj6=enefunc%nb14_lj6
-      d_nb14_num_nb14_calc=enefunc%num_nb14_calc
-      d_nb14_start_atom=domain%start_atom
+      if(topology_bypass()==0)d_nb14_num_nb14_calc=enefunc%num_nb14_calc
+      if(topology_bypass()==0)d_nb14_start_atom=domain%start_atom
       if(first) d_nb14_table_ene=enefunc%table%table_ene
       if(first) d_nb14_table_grad=enefunc%table%table_grad
       d_corr_cutoff=enefunc%cutoffdist
       d_corr_density=enefunc%table%density
-      d_corr_num_nonb_excl=enefunc%num_nonb_excl
-      d_corr_start_atom=domain%start_atom
+      if(topology_bypass()==0)d_corr_num_nonb_excl=enefunc%num_nonb_excl
+      if(topology_bypass()==0)d_corr_start_atom=domain%start_atom
       if(first) d_corr_table_decor=enefunc%table%table_decor
       if(first) d_corr_table_ecor=enefunc%table%table_ecor
 
     end if
     if(first.or.pairlist%univ_update/=0) then
+      if(topology_bypass()==0)then
       total=0
       do icell=1,cells
         h_offset_bond(icell)=total
         total=total+enefunc%num_bond(icell)
       end do
       if(total>capacity_bond) error stop 'GPU compact topology capacity changed'
-      live_bond=total
+      host_live_bond=total;live_bond=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_bond(icell)
@@ -416,7 +455,7 @@ contains
         total=total+enefunc%num_angle(icell)
       end do
       if(total>capacity_angle) error stop 'GPU compact topology capacity changed'
-      live_angle=total
+      host_live_angle=total;live_angle=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_angle(icell)
@@ -444,7 +483,7 @@ contains
         total=total+enefunc%num_dihedral(icell)
       end do
       if(total>capacity_dihed) error stop 'GPU compact topology capacity changed'
-      live_dihed=total
+      host_live_dihed=total;live_dihed=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_dihedral(icell)
@@ -470,7 +509,7 @@ contains
         total=total+enefunc%num_improper(icell)
       end do
       if(total>capacity_improper) error stop 'GPU compact topology capacity changed'
-      live_improper=total
+      host_live_improper=total;live_improper=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_improper(icell)
@@ -494,7 +533,7 @@ contains
         total=total+enefunc%num_nb14_calc(icell)
       end do
       if(total>capacity_nb14) error stop 'GPU compact topology capacity changed'
-      live_nb14=total
+      host_live_nb14=total;live_nb14=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_nb14_calc(icell)
@@ -514,7 +553,7 @@ contains
         total=total+enefunc%num_nonb_excl(icell)
       end do
       if(total>capacity_corr) error stop 'GPU compact topology capacity changed'
-      live_corr=total
+      host_live_corr=total;live_corr=total
       !$omp parallel do private(entry,slot) schedule(static)
       do icell=1,cells
         do entry=1,enefunc%num_nonb_excl(icell)
@@ -528,6 +567,8 @@ contains
       offset_corr=h_offset_corr;owner_corr=h_owner_corr;local_corr=h_local_corr
       d_corr_cell_move=h_corr_cell_move
       d_corr_nonb_excl_list=h_corr_nonb_excl_list
+      end if
+      call topology_check(producer_stream)
     end if
     snapshot_box=domain%system_size
     call checked(cudaMemcpyAsync(g_box,snapshot_box,3,cudaMemcpyHostToDevice,producer_stream))
@@ -542,27 +583,27 @@ contains
     end if
     call checked(cudaMemsetAsync(g_force,0.0d0,size(g_force),producer_stream))
     call values_pack(before_values,vir,b,a,u,d,i,e,v)
-    if(sum(enefunc%num_bond(1:cells))>0) call kernel_bond<<<(sum(enefunc%num_bond(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_bond>0) call kernel_bond<<<(host_live_bond+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_bond<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
-    if(sum(enefunc%num_angle(1:cells))>0) call kernel_angle<<<(sum(enefunc%num_angle(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_angle>0) call kernel_angle<<<(host_live_angle+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_angle<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
-    if(sum(enefunc%num_dihedral(1:cells))>0) call kernel_dihed<<<(sum(enefunc%num_dihedral(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_dihed>0) call kernel_dihed<<<(host_live_dihed+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_dihed<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
-    if(sum(enefunc%num_improper(1:cells))>0) call kernel_improper<<<(sum(enefunc%num_improper(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_improper>0) call kernel_improper<<<(host_live_improper+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_improper<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
-    if(sum(enefunc%num_nb14_calc(1:cells))>0) call kernel_nb14<<<(sum(enefunc%num_nb14_calc(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_nb14>0) call kernel_nb14<<<(host_live_nb14+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_nb14<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
-    if(sum(enefunc%num_nonb_excl(1:cells))>0) call kernel_corr<<<(sum(enefunc%num_nonb_excl(1:cells))+127)/128,128,0,producer_stream>>>()
+    if(host_live_corr>0) call kernel_corr<<<(host_live_corr+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
     call reduce_corr<<<cells,64,0,producer_stream>>>()
     call checked(cudaGetLastError())
@@ -575,10 +616,16 @@ contains
     type(s_domain),intent(in)::domain
     real(dp),intent(inout)::vir(:,:,:),b(:),a(:),u(:),d(:),i(:),e(:),v(:)
     real(8)::sum_values(10,nthread),current(10,nthread),reference(10,nthread),ratio,maximum,atol
-    integer::term,cell,worker,field
+    integer::term,cell,worker,field,mode
     integer(kind=cuda_stream_kind)::previous_stream
     previous_stream=cudaforGetDefaultStream()
     call checked(cudaforSetDefaultStream(stream=producer_stream))
+    mode=totals_mode()
+    if(mode/=0) then
+      call totals_run(sum_bond,sum_angle,sum_dihed,sum_improper,sum_nb14,sum_corr,cells,nthread,producer_stream,sum_values)
+      if(mode==2) current=sum_values
+    end if
+    if(mode/=1) then
     host_parts(:,:,1)=sum_bond
     host_parts(:,:,2)=sum_angle
     host_parts(:,:,3)=sum_dihed
@@ -595,6 +642,15 @@ contains
         sum_values(:,worker)=sum_values(:,worker)+host_parts(:,cell,term)
       end do
     end do
+    if(mode==2) then
+      if(any(transfer(sum_values,[0_8],size(sum_values))/=transfer(current,[0_8],size(current)))) &
+        error stop 'GPU bonded totals differ from ordered CPU accumulation'
+      sum_values=current
+      write(*,'(a)') 'GENESIS_BONDED_TOTALS: exact ordered accumulation pass'
+    end if
+    else
+      call checked(cudaforSetDefaultStream(stream=previous_stream))
+    end if
     if(.not.all(ieee_is_finite(sum_values))) error stop 'Nonfinite GPU bonded energy or virial'
     if(bonded_verify()) then
       call values_pack(current,vir,b,a,u,d,i,e,v)

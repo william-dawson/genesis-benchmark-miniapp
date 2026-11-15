@@ -13,7 +13,9 @@
 #endif
 
 module sp_energy_nonbond_gpu_mod
+  use maintenance_probe_mod,only:maintenance_probe_begin,maintenance_probe_end
 #ifdef USE_GPU
+  use nonbond_virial_mod,only:nonbond_energy_cpu_required
   use coordinate_pack_mod,only:coordinate_cpu_required,coordinate_require_host_c
 #endif
 
@@ -157,6 +159,8 @@ contains
     univ_update         =  pairlist%univ_update
 
     ij = domain%num_atom_domain
+    call maintenance_probe_begin(38)
+    if(nonbond_energy_cpu_required()) then
     call coordinate_require_host_c()
     !$omp parallel do private(i,ix,ixx,start_i)
     do i = 1, ncell
@@ -168,6 +172,8 @@ contains
       end do
     end do
     !$omp end parallel do
+    end if
+    call maintenance_probe_end(38)
 
     !
     ! launch GPU kernels
@@ -615,6 +621,7 @@ contains
 
     ij = domain%num_atom_domain
     if(coordinate_cpu_required(npt,cpu_calc)) then
+    call maintenance_probe_begin(39)
     !$omp parallel do private(i,ix,start_i)
     do i = 1, ncell
       start_i = start_atom(i)
@@ -625,6 +632,7 @@ contains
       end do
     end do
     !$omp end parallel do
+    call maintenance_probe_end(39)
     end if
 
     !  launch GPU kernels (data transfer from CPU to GPU as well)

@@ -13,6 +13,9 @@
 #endif
 
 module sp_update_domain_mod
+#ifdef USE_GPU
+  use translation_rebuild_mod,only:translation_rebuild_finish
+#endif
 
   use sp_domain_mod
   use sp_pairlist_mod
@@ -154,6 +157,9 @@ contains
     call maintenance_probe_end(12)
     call maintenance_probe_begin(13)
       call update_cell_boundary(domain, comm, boundary, constraints)
+#ifdef USE_GPU
+      call translation_rebuild_finish(domain,comm,boundary,constraints)
+#endif
     call maintenance_probe_end(13)
 
     call maintenance_probe_begin(14)

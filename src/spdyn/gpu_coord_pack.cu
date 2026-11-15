@@ -7,6 +7,24 @@
 #include <cstring>
 #include <vector>
 
+extern "C" void genesis_translation_require_host();
+extern "C" void genesis_translation_invalidate();
+extern "C" void genesis_translation_configure(const double*,const double*,const int*,int,int);
+extern "C" void genesis_translation_configure_device(const double*,const double*,const int*,int,int);
+extern "C" int genesis_pack_resident_available();
+extern "C" int genesis_pack_resident_copy(const double*,double*,double*,int*,int*,const double*,const double*,const int*,const int*,int,int);
+extern "C" int genesis_state_cycle_retired();
+extern "C" void genesis_state_cycle_host_refreshed();
+
+extern "C" int genesis_nonbond_virial_host_required();
+extern "C" int genesis_remap_mode();
+extern "C" void genesis_remap_poison(double*,double*,int);
+extern "C" void genesis_remap_record(int);
+extern "C" void genesis_remap_publish(const double*,const double*,const double*,const double*,const double*,
+    const double*,const double*,const double*,const double*,const int*,const int*,int,int,int);
+
+extern "C" int genesis_pair_prepare_coord_copy(void*,int,int,std::uintptr_t,int);
+extern "C" void genesis_pair_prepare_expire();
 namespace {
 void checked(cudaError_t status) {
     if(status!=cudaSuccess) {
@@ -78,13 +96,14 @@ extern "C" int genesis_coord_pme() {
     }
     return enabled;
 }
-extern "C" void genesis_coord_host_refreshed() {state.host_current=true;}
+extern "C" void genesis_coord_host_refreshed() {state.host_current=true;genesis_state_cycle_host_refreshed();}
 extern "C" void genesis_coord_require_host() {
+    genesis_translation_require_host();
     if(state.active&&!state.host_current) {
         std::fprintf(stderr,"A CPU packed-coordinate consumer has stale coordinates\n");std::abort();
     }
 }
-extern "C" void genesis_coord_invalidate() {state.active=false;}
+extern "C" void genesis_coord_invalidate() {genesis_translation_invalidate();state.active=false;}
 
 extern "C" void genesis_coord_configure(const double *coordinates,const double *translation,
     const double *charge,const int *counts,const int *starts,int width,int cells,int atoms) {
@@ -110,6 +129,10 @@ extern "C" void genesis_coord_configure(const double *coordinates,const double *
     }
     if(next!=atoms)std::abort();
     s.coordinates=coordinates;s.active=false;
+    if(genesis_pack_resident_copy(coordinates,s.translation,s.charge,s.counts,s.starts,translation,charge,counts,starts,width,cells)) {
+        genesis_translation_configure_device(s.translation,translation,counts,width,cells);return;
+    }
+    genesis_translation_configure(s.translation,translation,counts,width,cells);
     checked(cudaMemcpy(s.translation,translation,3ull*width*cells*sizeof(double),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.charge,charge,size_t(width)*cells*sizeof(double),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.counts,counts,size_t(cells)*sizeof(int),cudaMemcpyHostToDevice));
@@ -117,6 +140,7 @@ extern "C" void genesis_coord_configure(const double *coordinates,const double *
 }
 
 extern "C" void genesis_coord_pack(double x,double y,double z,int short_step) {
+    genesis_pair_prepare_expire();
     if(!genesis_coord_enabled())return;
     auto &s=state;
     if(!s.coordinates)std::abort();
@@ -131,19 +155,20 @@ extern "C" void genesis_coord_pack(double x,double y,double z,int short_step) {
 
 extern "C" int genesis_coord_copy(void *destination,int atoms,int components,std::uintptr_t stream,int consumer) {
     auto &s=state;
-    if(!s.active)return 0;
+    if(!s.active)return genesis_pair_prepare_coord_copy(destination,atoms,components,stream,consumer);
     if(atoms!=s.atoms||components<3||components>4||consumer<0||consumer>2)std::abort();
     if(consumer==2&&!genesis_coord_pme())return 0;
     auto target=reinterpret_cast<cudaStream_t>(stream);
     checked(cudaStreamWaitEvent(target,s.ready,0));
     checked(cudaMemcpyAsync(destination,consumer==2?s.raw:s.packed,size_t(components)*atoms*sizeof(double),cudaMemcpyDeviceToDevice,target));
     checked(cudaEventRecord(s.consumed[consumer],target));s.copied[consumer]=true;
+    genesis_remap_record(consumer);
     return 1;
 }
 
 extern "C" int genesis_coord_cpu_required(int virial,int cpu_calc) {
     if(!state.active)return 1;
-    const bool required=genesis_coord_verify()==1||setting("GENESIS_FORCE_VERIFY")||(!state.short_step&&(virial||cpu_calc));
+    const bool required=genesis_coord_verify()==1||setting("GENESIS_FORCE_VERIFY")||(!state.short_step&&(cpu_calc||(virial&&genesis_nonbond_virial_host_required())));
     if(required)genesis_coord_require_host();
     return required;
 }
@@ -185,4 +210,19 @@ extern "C" void genesis_coord_check(const double *coordinates,const double *tran
     }
     if(maximum>1) {std::fprintf(stderr,"GENESIS periodic packing error %.12e\n",maximum);std::abort();}
     std::printf("GENESIS_COORD_VERIFY: periodic coordinates pass %.12e\n",maximum);
+}
+
+extern "C" void genesis_coord_prepare_remap(const double *coordinates,const double *velocity,const double *gpu_velocity,
+    const double *translation,const double *charge,const int *counts,const int *starts) {
+    auto &s=state;
+    if(!genesis_remap_mode()||s.active||!s.coordinates||!genesis_coord_pme())std::abort();
+    if(genesis_remap_mode()==2) {
+        for(int consumer=0;consumer<3;++consumer)if(s.copied[consumer])
+            checked(cudaStreamWaitEvent(0,s.consumed[consumer],0));
+        genesis_remap_poison(s.packed,s.raw,s.atoms);
+    }
+    genesis_coord_pack(1.0,1.0,1.0,0);
+    s.host_current=!genesis_state_cycle_retired();
+    genesis_remap_publish(s.coordinates,gpu_velocity,s.translation,s.packed,s.raw,coordinates,velocity,
+        translation,charge,counts,starts,s.width,s.cells,s.atoms);
 }

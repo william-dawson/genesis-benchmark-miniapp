@@ -123,6 +123,7 @@ module sp_energy_pme_noopt_2dalltoall_mod
 #if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
   integer, external :: genesis_pme_gpu_enabled, genesis_pme_gpu_raw
   integer, external :: genesis_pme_gpu_parallel_clear
+  integer, external :: genesis_long_force_requested
   real(dp), external :: genesis_pme_gpu_wall_time
   interface
     subroutine genesis_pme_host_clear(ncell, stride, first, force) bind(c)
@@ -1006,11 +1007,13 @@ contains
       if (size(force,1) /= 3 .or. size(force,2) /= MaxAtom) &
         call error_msg('GPU PME force layout mismatch')
       gpu_begin = genesis_pme_gpu_wall_time()
+      if(genesis_long_force_requested()==0) then
       if (genesis_pme_gpu_parallel_clear() /= 0) then
         if (.not. is_contiguous(force)) call error_msg('GPU PME clear buffer is not contiguous')
         call genesis_pme_host_clear(size(force,3), MaxAtom, domain%num_cell_local+1, c_loc(force))
       else
         force(:,:,domain%num_cell_local+1:) = 0.0_wip
+      end if
       end if
       gpu_elapsed = genesis_pme_gpu_wall_time() - gpu_begin
       call genesis_pme_gpu_clear_time(gpu_elapsed)

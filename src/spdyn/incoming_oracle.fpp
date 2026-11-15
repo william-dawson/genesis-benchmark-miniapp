@@ -9,7 +9,7 @@ module incoming_oracle_mod
   real(wip),allocatable,target,save::x(:,:,:),v(:,:,:),m(:,:),dist(:,:,:,:)
   real(wp),allocatable,target,save::q(:,:)
   integer,allocatable,target,save::ids(:,:),sol(:,:),cls(:,:),water(:,:,:),groups(:,:,:,:)
-  integer,allocatable,save::nw(:),na(:),ns(:),ng(:,:)
+  integer,allocatable,save::nw(:),na(:),ns(:),ng(:,:),nh(:)
   integer(int2),allocatable,target,save::reverse(:,:)
   interface
     integer(c_int) function compare(a,b,n) bind(C,name='memcmp')
@@ -49,7 +49,11 @@ contains
       nw=domain%num_water;na=domain%num_atom;water=domain%water_list
     else
       ns=domain%num_solute;sol=domain%id_l2g_solute;reverse=domain%id_g2l
-      ng=constraints%HGr_local;groups=constraints%HGr_bond_list;dist=constraints%HGr_bond_dist
+      if(kind==3)then
+        nh=constraints%No_HGr
+      else
+        ng=constraints%HGr_local;groups=constraints%HGr_bond_list;dist=constraints%HGr_bond_dist
+      end if
     end if
   end subroutine
   subroutine equal(a,b,n)
@@ -68,6 +72,9 @@ contains
         if(nw(cell)/=domain%num_water(cell).or.na(cell)/=domain%num_atom(cell))error stop 'Water count mismatch'
         first=domain%num_solute(cell)+1;last=domain%num_atom(cell)
         if(nw(cell)>0)call equal(c_loc(water(1,1,cell)),c_loc(domain%water_list(1,1,cell)),int(12*nw(cell),c_size_t))
+      else if(kind==3)then
+        if(nh(cell)/=constraints%No_HGr(cell))error stop 'No-H group count mismatch'
+        first=1;last=constraints%No_HGr(cell)
       else
         if(ns(cell)/=domain%num_solute(cell))error stop 'Solute count mismatch'
         first=constraints%No_HGr(cell)+1;last=domain%num_solute(cell)
@@ -91,7 +98,7 @@ contains
       call equal(c_loc(q(first,cell)),c_loc(domain%charge(first,cell)),int(storage_size(q)/8*n,c_size_t))
       call equal(c_loc(ids(first,cell)),c_loc(domain%id_l2g(first,cell)),int(4*n,c_size_t))
       call equal(c_loc(cls(first,cell)),c_loc(domain%atom_cls_no(first,cell)),int(4*n,c_size_t))
-      if(kind==2)then
+      if(kind==2.or.kind==3)then
         call equal(c_loc(sol(first,cell)),c_loc(domain%id_l2g_solute(first,cell)),int(4*n,c_size_t))
         do k=first,last
           id=domain%id_l2g_solute(k,cell)

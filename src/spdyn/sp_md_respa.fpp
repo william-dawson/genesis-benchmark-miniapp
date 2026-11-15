@@ -15,7 +15,8 @@
 
 module sp_md_respa_mod
 #ifdef USE_GPU
-  use force_assembly_mod,only:force_resident_set,force_resident_active
+  use translation_rebuild_mod,only:translation_rebuild_begin,translation_output_skip
+  use force_assembly_mod,only:force_resident_set,force_resident_active,long_force_available
   use coordinate_pack_mod,only:coordinate_active
   use genesis_step_state_mod
 #endif
@@ -250,7 +251,7 @@ contains
 #ifdef USE_GPU
     if(step_output_due(dynamics,dynvars%step)) then
     if(step_enabled()) then
-      call step_sync(domain)
+      call step_sync(domain,skip_translation=translation_output_skip(domain,coordinate_active()))
     end if
     end if
 #endif
@@ -283,7 +284,9 @@ contains
         if (mod(istep-1, dynamics%eneout_period) == 0 .and. istep > istart) then
 #ifdef USE_GPU
     if(step_enabled()) then
-      call step_sync(domain)
+    if(.not.step_report(domain,dynvars))then
+      call step_sync(domain,skip_translation=translation_output_skip(domain,coordinate_active()))
+    end if
     end if
 #endif
           call compute_dynvars(enefunc, dynamics, boundary, ensemble, domain, &
@@ -320,7 +323,9 @@ contains
 #ifdef USE_GPU
     if(mod(istep,dynamics%nbupdate_period)==0) then
     if(step_enabled()) then
-      call step_sync(domain)
+      call translation_rebuild_begin(domain,comm)
+      call step_sync(domain,maintenance=step_candidate2(ensemble,domain,constraints).and. &
+        mod(istep,dynamics%elec_long_period)==0)
       call step_forget(.true.)
     end if
     end if
@@ -329,6 +334,10 @@ contains
             call domain_interaction_update(istep, dynamics%nbupdate_period,     &
                                          domain, enefunc, pairlist, boundary, &
                                          constraints, comm)
+#ifdef USE_GPU
+    if(mod(istep,dynamics%nbupdate_period)==0.and.step_candidate2(ensemble,domain,constraints).and. &
+       mod(istep,dynamics%elec_long_period)==0) call step_prepare_remap(domain,constraints)
+#endif
 
         end if
 
@@ -420,7 +429,13 @@ contains
           call timer(TimerIntegrator, TimerOn)
           call timer(TimerComm2, TimerOn)
 
+#ifdef USE_GPU
+          if(.not.long_force_available()) then
+#endif
           call communicate_force(domain, comm, force_long)
+#ifdef USE_GPU
+          end if
+#endif
 #ifdef USE_GPU
       if(.not.force_resident_active()) then
 #endif

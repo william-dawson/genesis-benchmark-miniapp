@@ -7,6 +7,9 @@
 #include <chrono>
 #define CHECK(call) do { cudaError_t e=(call); if(e!=cudaSuccess) { \
   std::fprintf(stderr,"bonded migration: %s: %s\n",#call,cudaGetErrorString(e));std::abort(); } } while(0)
+extern "C" int genesis_bonded_residency_enabled();
+extern "C" int genesis_bonded_residency_prepare(int4*,int,int,cudaStream_t);
+extern "C" void genesis_bonded_residency_scatter(int,const int*,const int*,const int*,const int*,const int*,const double*,int*,int,cudaStream_t);
 namespace {
 struct Cache { int *integers;double *reals;int total,sites; };
 struct CacheSet { Cache kind[3]; } caches{};
@@ -130,7 +133,8 @@ extern "C" void genesis_bonded_batch(int n,const int16_t *map,const int16_t *own
   if(atoms!=cached_atoms || cells!=cached_cells || pitch!=cached_pitch || owner!=owner_address)std::abort();
   if(timing)CHECK(cudaEventRecord(begin_event,queue));
   CHECK(cudaMemcpyAsync(mapping,map,size_t(atoms)*2*sizeof(int16_t),cudaMemcpyHostToDevice,queue));
-  if(n)CHECK(cudaMemcpyAsync(input,host_input,size_t(n)*sizeof(int4),cudaMemcpyHostToDevice,queue));
+  if(!genesis_bonded_residency_prepare(input,n,cells,queue) && n)
+    CHECK(cudaMemcpyAsync(input,host_input,size_t(n)*sizeof(int4),cudaMemcpyHostToDevice,queue));
   CHECK(cudaMemsetAsync(result,0,2*sizeof(int),queue));
   if(timing)CHECK(cudaEventRecord(copy_event,queue));
   if(n) {
@@ -156,14 +160,16 @@ extern "C" void genesis_bonded_batch(int n,const int16_t *map,const int16_t *own
                                           source_ranges,destination_ranges,caches);CHECK(cudaGetLastError());
   }
   if(timing)CHECK(cudaEventRecord(end_event,queue));
-  if(m) {
+  if(!genesis_bonded_residency_enabled() && m) {
     CHECK(cudaMemcpyAsync(host_exits,exits,size_t(m)*4,cudaMemcpyDeviceToHost,queue));
     CHECK(cudaMemcpyAsync(host_ids,ids,size_t(m)*4,cudaMemcpyDeviceToHost,queue));
     CHECK(cudaMemcpyAsync(host_integers,integers,size_t(m)*9*4,cudaMemcpyDeviceToHost,queue));
     CHECK(cudaMemcpyAsync(host_reals,reals,size_t(m)*4*sizeof(double),cudaMemcpyDeviceToHost,queue));
   }
-  CHECK(cudaMemcpyAsync(host_source_ranges,source_ranges,size_t(cells)*6*4,cudaMemcpyDeviceToHost,queue));
-  CHECK(cudaMemcpyAsync(host_destination_ranges,destination_ranges,size_t(cells)*6*4,cudaMemcpyDeviceToHost,queue));
+  if(!genesis_bonded_residency_enabled()) {
+    CHECK(cudaMemcpyAsync(host_source_ranges,source_ranges,size_t(cells)*6*4,cudaMemcpyDeviceToHost,queue));
+    CHECK(cudaMemcpyAsync(host_destination_ranges,destination_ranges,size_t(cells)*6*4,cudaMemcpyDeviceToHost,queue));
+  }
   CHECK(cudaStreamSynchronize(queue));
   *out_exits=host_exits;*out_ids=host_ids;*out_integers=host_integers;*out_reals=host_reals;
   *out_src=host_source_ranges;*out_dst=host_destination_ranges;
@@ -173,4 +179,12 @@ extern "C" void genesis_bonded_batch(int n,const int16_t *map,const int16_t *own
     const double host=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count();
     std::printf("GENESIS_BONDED_MIGRATION_GPU: 0 %d %d %.6f %.6f %.6f\n",n,m,upload*1000,pipeline*1000,host);
   }
+}
+
+extern "C" void genesis_bonded_scatter_resident(int kind,int *incoming,int capacity) {
+  genesis_bonded_residency_scatter(kind,source_ranges,destination_ranges,exits,ids,integers,reals,incoming,capacity,queue);
+}
+
+extern "C" void genesis_bonded_device_packets(const int **source,const int **destination,const int **slots,const int **identities,const int **ivals,const double **rvals) {
+ *source=source_ranges;*destination=destination_ranges;*slots=exits;*identities=ids;*ivals=integers;*rvals=reals;
 }

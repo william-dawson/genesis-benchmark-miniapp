@@ -14,6 +14,9 @@
 
 module sp_pairlist_gpu_mod
 
+#ifdef USE_GPU
+  use pair_prepare_mod,only:pair_prepare_begin,pair_prepare_reference
+#endif
   use iso_c_binding, only: c_loc
   use genesis_pair_host_mod
   use genesis_pair_sort_mod
@@ -68,7 +71,7 @@ contains
     integer                   :: num_nb15_total, num_nb15_total1
     integer                   :: num_excl, ini_excl, fin_excl
     integer                   :: num_nb14, ini_nb14, fin_nb14
-    logical                   :: nb15_calc
+    logical                   :: nb15_calc,prepared
     integer                   :: id, omp_get_thread_num
 
     real(wip),        pointer :: coord(:,:,:)
@@ -148,6 +151,8 @@ contains
 
     ! allocation of mask
     !
+    prepared=pair_prepare_begin(domain,max_natom)
+    if(.not.prepared.or.pair_prepare_reference())then
     max_natom = 0
     do i = 1, ncell+nboundary
       if (max_natom < natom(i)) then
@@ -175,6 +180,7 @@ contains
       end do
     end do
     !$omp end parallel do
+    end if
 
 #ifdef DEBUG
     if (max_natom > MaxAtom) then

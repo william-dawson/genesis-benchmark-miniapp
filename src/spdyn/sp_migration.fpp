@@ -15,6 +15,9 @@
 module sp_migration_mod
   use incoming_oracle_mod
 #ifdef USE_GPU
+  use improper_outgoing_mod
+  use bonded_incoming_mod
+  use incoming_gpu_mod
   use hgr_migration_mod
   use bonded_migration_mod
   use water_migration_mod
@@ -66,7 +69,25 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_outgoing_atom(boundary, constraints, domain)
+  subroutine update_outgoing_atom(boundary,constraints,domain)
+    type(s_boundary),target,intent(in)::boundary
+    type(s_constraints),target,intent(in)::constraints
+    type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(outgoing_atom_gpu(boundary,constraints,domain))then
+      if(outgoing_atom_verify())then
+        call update_outgoing_atom_cpu(boundary,constraints,domain)
+        call outgoing_atom_check()
+      end if
+    else
+#endif
+      call update_outgoing_atom_cpu(boundary,constraints,domain)
+#ifdef USE_GPU
+    end if
+#endif
+  end subroutine
+
+  subroutine update_outgoing_atom_cpu(boundary, constraints, domain)
 
     ! formal arguments
     type(s_boundary),    target, intent(in)    :: boundary
@@ -205,7 +226,7 @@ contains
 
     return
 
-  end subroutine update_outgoing_atom
+  end subroutine update_outgoing_atom_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -624,7 +645,26 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_atom(constraints, domain)
+  subroutine update_incoming_atom(constraints,domain)
+    type(s_constraints),target,intent(inout)::constraints
+    type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(incoming_gpu_enabled())then
+      if(incoming_gpu_verify())call incoming_atom_backup(domain,constraints)
+      call incoming_atom_gpu(constraints,domain)
+      if(incoming_gpu_verify())then
+        call incoming_save(domain,constraints,kind=3)
+        call incoming_atom_restore(domain,constraints)
+        call update_incoming_atom_serial(constraints,domain)
+        call incoming_check(domain,constraints,kind=3)
+      end if
+      return
+    end if
+#endif
+    call update_incoming_atom_serial(constraints,domain)
+  end subroutine update_incoming_atom
+
+  subroutine update_incoming_atom_serial(constraints, domain)
 
     ! formal arguments
     type(s_constraints), target, intent(inout) :: constraints
@@ -776,7 +816,7 @@ contains
 
     return
 
-  end subroutine update_incoming_atom
+  end subroutine update_incoming_atom_serial
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -791,6 +831,17 @@ contains
   subroutine update_incoming_water(water_atom,domain)
     integer,intent(in)::water_atom
     type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(incoming_gpu_enabled())then
+      call incoming_water_gpu(water_atom,domain)
+      if(incoming_gpu_verify())then
+        call incoming_save(domain,kind=1)
+        call update_incoming_water_serial(water_atom,domain)
+        call incoming_check(domain,kind=1)
+      end if
+      return
+    end if
+#endif
     if(iand(incoming_mode(),1)/=0)then
       call update_incoming_water_parallel(water_atom,domain)
       if(incoming_verify())then
@@ -1016,6 +1067,17 @@ contains
   subroutine update_incoming_HGr(constraints,domain)
     type(s_constraints),target,intent(inout)::constraints
     type(s_domain),target,intent(inout)::domain
+#ifdef USE_GPU
+    if(incoming_gpu_enabled())then
+      call incoming_group_gpu(constraints,domain)
+      if(incoming_gpu_verify())then
+        call incoming_save(domain,constraints,kind=2)
+        call update_incoming_HGr_serial(constraints,domain)
+        call incoming_check(domain,constraints,kind=2)
+      end if
+      return
+    end if
+#endif
     if(iand(incoming_mode(),2)/=0)then
       call update_incoming_HGr_parallel(constraints,domain)
       if(incoming_verify())then
@@ -1372,7 +1434,20 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_enefunc_bond(domain, enefunc)
+  subroutine update_incoming_enefunc_bond(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(bonded_incoming_begin(1,domain,enefunc))then
+      if(bonded_incoming_reference())call update_incoming_enefunc_bond_cpu(domain,enefunc)
+      call bonded_incoming_finish(1)
+      return
+    end if
+#endif
+    call update_incoming_enefunc_bond_cpu(domain,enefunc)
+  end subroutine update_incoming_enefunc_bond
+
+  subroutine update_incoming_enefunc_bond_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -1504,7 +1579,7 @@ contains
 
     return
 
-  end subroutine update_incoming_enefunc_bond
+  end subroutine update_incoming_enefunc_bond_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -1623,7 +1698,20 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_enefunc_angl(domain, enefunc)
+  subroutine update_incoming_enefunc_angl(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(bonded_incoming_begin(2,domain,enefunc))then
+      if(bonded_incoming_reference())call update_incoming_enefunc_angl_cpu(domain,enefunc)
+      call bonded_incoming_finish(2)
+      return
+    end if
+#endif
+    call update_incoming_enefunc_angl_cpu(domain,enefunc)
+  end subroutine update_incoming_enefunc_angl
+
+  subroutine update_incoming_enefunc_angl_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -1776,7 +1864,7 @@ contains
 
     return
 
-  end subroutine update_incoming_enefunc_angl
+  end subroutine update_incoming_enefunc_angl_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -1899,7 +1987,20 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_enefunc_dihe(domain, enefunc)
+  subroutine update_incoming_enefunc_dihe(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(bonded_incoming_begin(3,domain,enefunc))then
+      if(bonded_incoming_reference())call update_incoming_enefunc_dihe_cpu(domain,enefunc)
+      call bonded_incoming_finish(3)
+      return
+    end if
+#endif
+    call update_incoming_enefunc_dihe_cpu(domain,enefunc)
+  end subroutine update_incoming_enefunc_dihe
+
+  subroutine update_incoming_enefunc_dihe_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -2051,7 +2152,7 @@ contains
 
     return
 
-  end subroutine update_incoming_enefunc_dihe
+  end subroutine update_incoming_enefunc_dihe_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -2162,7 +2263,20 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_enefunc_rb_dihe(domain, enefunc)
+  subroutine update_incoming_enefunc_rb_dihe(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(bonded_incoming_begin(5,domain,enefunc))then
+      if(bonded_incoming_reference())call update_incoming_enefunc_rb_dihe_cpu(domain,enefunc)
+      call bonded_incoming_finish(5)
+      return
+    end if
+#endif
+    call update_incoming_enefunc_rb_dihe_cpu(domain,enefunc)
+  end subroutine update_incoming_enefunc_rb_dihe
+
+  subroutine update_incoming_enefunc_rb_dihe_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -2311,7 +2425,7 @@ contains
 
     return
 
-  end subroutine update_incoming_enefunc_rb_dihe
+  end subroutine update_incoming_enefunc_rb_dihe_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -2324,7 +2438,22 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_outgoing_enefunc_impr(domain, enefunc)
+  subroutine update_outgoing_enefunc_impr(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(improper_outgoing(domain,enefunc))then
+      if(improper_outgoing_verify())then
+        call update_outgoing_enefunc_impr_cpu(domain,enefunc)
+        call improper_outgoing_check()
+      end if
+      return
+    end if
+#endif
+    call update_outgoing_enefunc_impr_cpu(domain,enefunc)
+  end subroutine
+
+  subroutine update_outgoing_enefunc_impr_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -2408,7 +2537,7 @@ contains
 
     return
 
-  end subroutine update_outgoing_enefunc_impr
+  end subroutine update_outgoing_enefunc_impr_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !
@@ -2421,7 +2550,20 @@ contains
   !
   !======1=========2=========3=========4=========5=========6=========7=========8
 
-  subroutine update_incoming_enefunc_impr(domain, enefunc)
+  subroutine update_incoming_enefunc_impr(domain,enefunc)
+    type(s_domain),target,intent(in)::domain
+    type(s_enefunc),target,intent(inout)::enefunc
+#ifdef USE_GPU
+    if(bonded_incoming_begin(4,domain,enefunc))then
+      if(bonded_incoming_reference())call update_incoming_enefunc_impr_cpu(domain,enefunc)
+      call bonded_incoming_finish(4)
+      return
+    end if
+#endif
+    call update_incoming_enefunc_impr_cpu(domain,enefunc)
+  end subroutine update_incoming_enefunc_impr
+
+  subroutine update_incoming_enefunc_impr_cpu(domain, enefunc)
 
     ! formal arguments
     type(s_domain),  target, intent(in)    :: domain
@@ -2555,7 +2697,7 @@ contains
 
     return
 
-  end subroutine update_incoming_enefunc_impr
+  end subroutine update_incoming_enefunc_impr_cpu
 
   !======1=========2=========3=========4=========5=========6=========7=========8
   !

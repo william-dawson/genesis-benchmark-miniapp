@@ -2,6 +2,8 @@
 #include "../config.h"
 #endif
 module genesis_thermo_mod
+  use observables_mod,only:observables_stage
+  use final_reductions_mod
   use cudafor
   use constants_mod
   use sp_domain_str_mod
@@ -12,9 +14,18 @@ module genesis_thermo_mod
   private
   public::thermo_enabled,thermo_verify,thermo_statistics,thermo_output
   public::thermo_scale_reference,thermo_scale_check
+  public::thermo_report
   real(8),device,allocatable::total_force(:,:,:),half_velocity(:,:,:),partial(:,:)
   real(8),allocatable,pinned::host_partial(:,:),reference(:,:,:),actual(:,:,:)
 contains
+  logical function thermo_report(vref,mass,counts,step) result(skip)
+    real(8),device,intent(in)::vref(:,:,:),mass(:,:)
+    integer,device,intent(in)::counts(:)
+    integer,intent(in)::step
+    skip=.false.
+    if(.not.allocated(total_force))return
+    skip=observables_stage(total_force,vref,mass,counts,step)
+  end function
   logical function thermo_enabled()
     integer,save::selected=-1
     integer::status,code
@@ -64,10 +75,14 @@ contains
     call group_statistics<<<count,128>>>(width,count,size(wl,1),size(wl,2),size(li,1),size(li,2), &
        size(hl,1),v,x,total_force,half_velocity,m,ns,nw,wl,hl,li,partial)
     call checked(cudaGetLastError())
-    host_partial=partial;values=0
-    do cell=1,count
-      values=values+host_partial(:,cell)
-    end do
+    if(final_reductions_enabled())then
+      call final_thermostat_reduce(partial,host_partial,values)
+    else
+      host_partial=partial;values=0
+      do cell=1,count
+        values=values+host_partial(:,cell)
+      end do
+    end if
     if(.not.all(ieee_is_finite(values))) error stop 'Nonfinite thermostat statistics'
     if(thermo_verify()) then
       allocate(host_x(3,width,count),host_force(3,width,count),host_half(3,width,count))

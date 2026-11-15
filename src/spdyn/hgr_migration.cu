@@ -11,6 +11,9 @@
 
 extern "C" void genesis_hgr_scatter(double *,double *,int *,int *,int *,int *,
     const double *,const int *,const int *,int,int,int,int,int);
+extern "C" int genesis_migration_resident();
+extern "C" int genesis_migration_host_packets();
+extern "C" int genesis_migration_prefix(int,int*,int*,int,int,int);
 namespace {
 void require(bool value,const char *message) {
     if(!value) {std::fprintf(stderr,"HGr migration: %s\n",message);std::abort();}
@@ -120,12 +123,16 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
     s.latched=false;
     auto begin=std::chrono::steady_clock::now();
     const int buckets=s.connect*s.cells,globals=grid[0]*grid[1]*grid[2];
+    const bool resident=genesis_migration_resident(),first_allocation=!s.capacity;
     std::vector<int> prefix(buckets+1);
+    if(!resident || first_allocation){
     for(int b=0;b<buckets;++b) {
         require(counts[b]>=0&&counts[b]<=s.group_width,"invalid group count");
         prefix[b+1]=prefix[b]+counts[b];
     }
-    s.total=prefix.back();require(s.total>0&&atoms>0,"empty groups");
+    s.total=prefix.back();
+    }
+    require(s.total>0&&atoms>0,"empty groups");
     if(!s.capacity) {
         s.capacity=s.total;s.globals=globals;s.atoms=atoms;
         for(auto &p:s.keys)checked(cudaMalloc(&p,size_t(s.capacity)*sizeof(int)));
@@ -158,9 +165,11 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
     }
     require(globals==s.globals&&atoms==s.atoms&&s.total==s.capacity,"global shape or group count changed");
     checked(cudaStreamWaitEvent(0,s.ready,0));
+    if(!genesis_migration_prefix(2,s.prefix,s.ids,s.cells,s.width,s.connect)) {
     checked(cudaMemcpy(s.ids,ids,size_t(s.width)*s.cells*sizeof(int),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.prefix,prefix.data(),size_t(buckets+1)*sizeof(int),cudaMemcpyHostToDevice));
-    checked(cudaMemcpy(s.map,map,size_t(globals)*sizeof(std::int16_t),cudaMemcpyHostToDevice));
+    }
+    if(!resident || first_allocation)checked(cudaMemcpy(s.map,map,size_t(globals)*sizeof(std::int16_t),cudaMemcpyHostToDevice));
     checked(cudaMemset(s.ranges,0xff,4ull*buckets*sizeof(int)));checked(cudaMemset(s.error,0,sizeof(int)));
     if(s.timing)checked(cudaEventRecord(s.start,0));
     hgr_classify<<<(s.group_width*buckets+255)/256,256>>>(s.x,s.groups,s.counts,s.prefix,s.map,s.keys[0],s.values[0],s.error,
@@ -172,17 +181,22 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
     hgr_pack<<<(s.total+255)/256,256>>>(s.x,s.v,s.dist,s.groups,s.ids,s.attributes,s.keys[1],s.values[1],s.ranges,
         s.real,s.integers,s.error,s.width,s.group_width,s.sites,s.connect,s.total,s.atoms);
     checked(cudaGetLastError());if(s.timing)checked(cudaEventRecord(s.finish,0));
+    const auto copied=std::chrono::steady_clock::now();
+    if(genesis_migration_host_packets()) {
     checked(cudaMemcpy(s.host_real,s.real,9ull*s.sites*s.total*sizeof(double),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_integer,s.integers,3ull*s.sites*s.total*sizeof(int),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ranges,s.ranges,4ull*buckets*sizeof(int),cudaMemcpyDeviceToHost));
     int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));require(!error,"invalid classification/atom");
-    auto copied=std::chrono::steady_clock::now();
+
     for(int b=0;b<2*buckets;++b) {
         const int first=s.host_ranges[2*b],last=s.host_ranges[2*b+1],count=first<0?0:last-first;
         require(count>=0&&count<=(b<buckets?stay_capacity:move_capacity),"destination overflow");
     }
     genesis_hgr_scatter(stay_real,move_real,stay_integer,move_integer,stay,move,s.host_real,s.host_integer,
         s.host_ranges,s.cells,s.connect,s.sites,stay_capacity,move_capacity);
+    } else {
+      int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));require(!error,"invalid resident migration packet");
+    }
     if(s.timing) {
         float ms=0;checked(cudaEventElapsedTime(&ms,s.start,s.finish));
         std::printf("GENESIS_HGR_TIMING: %d %.9f %.9f %.9f\n",s.total,double(ms)*1e-3,
@@ -208,4 +222,8 @@ extern "C" void genesis_hgr_check(const int *stay,const int *move,const double *
     }
     require(seen==s.total,"group conservation failed");
     std::printf("GENESIS_HGR_VERIFY: exact packing pass %d\n",seen);
+}
+
+extern "C" void genesis_hgr_payload_view(const double **real,const int **integer,const int **ranges,int *sites,int *cells,int *connect) {
+    *real=state.real;*integer=state.integers;*ranges=state.ranges;*sites=state.sites;*cells=state.cells;*connect=state.connect;
 }

@@ -14,8 +14,10 @@
 #endif
 
 module sp_energy_mod
+  use maintenance_probe_mod,only:maintenance_probe_begin,maintenance_probe_end
 #ifdef USE_GPU
   use force_assembly_mod
+  use nonbond_virial_mod
   use bonded_force_mod
 #endif
 
@@ -1005,6 +1007,7 @@ contains
     real(wip)                :: trans(1:3)
     real(wip)                :: force_tmp(1:3)
     integer                  :: ncell, natom, id, i, k, ix, ic, jc, start_i
+    logical                  :: clear_long,clear_output,nonbond_virial_handled
     integer                  :: omp_get_thread_num
 
 
@@ -1017,18 +1020,26 @@ contains
     !
     call init_energy(energy)
 
+    clear_long=.true.
+    clear_output=.true.
+#ifdef USE_GPU
+    clear_long=.not.long_force_active()
+    if(domain%nonbond_kernel==NBK_GPU.and.force_assembly_enabled().and.bonded_enabled()) &
+      clear_output=force_clear_mode()==0
+    if(.not.clear_output) call force_clear_poison(force)
+#endif
+    call maintenance_probe_begin(34)
+    if(clear_output.or.clear_long) then
     !$omp parallel do private(i,ix,id)
     do i = 1, ncell
       do ix = 1, natom
-        force     (1,ix,i) = 0.0_wip
-        force     (2,ix,i) = 0.0_wip
-        force     (3,ix,i) = 0.0_wip
-        force_long(1,ix,i) = 0.0_wip
-        force_long(2,ix,i) = 0.0_wip
-        force_long(3,ix,i) = 0.0_wip
+        if(clear_output) force(:,ix,i) = 0.0_wip
+        if(clear_long) force_long(:,ix,i) = 0.0_wip
       end do
     end do
     !$omp end parallel do
+    end if
+    call maintenance_probe_end(34)
 
     virial     (1:3,1:3) = 0.0_dp
     virial_long(1:3,1:3) = 0.0_dp
@@ -1111,6 +1122,10 @@ contains
     ! setup for emfit
     !
 
+#ifdef USE_GPU
+    if(domain%nonbond_kernel==NBK_GPU.and.enefunc%pme_use) &
+      call nonbond_virial_prepare(domain,npt.or.nonb_ene)
+#endif
     ! nonbonded energy
     !
     select case (boundary%type)
@@ -1280,7 +1295,12 @@ contains
 
     ! virial with periodic boundary condition
     !
-    if (enefunc%pme_use .and. (nonb_ene .or. npt) .and. &
+    nonbond_virial_handled=.false.
+#ifdef USE_GPU
+    nonbond_virial_handled=nonbond_virial_begin(virial_omp)
+#endif
+    call maintenance_probe_begin(37)
+    if (.not.nonbond_virial_handled.and.enefunc%pme_use .and. (nonb_ene .or. npt) .and. &
         domain%nonbond_kernel /= NBK_Fugaku .and. &
         domain%nonbond_kernel /= NBK_Intel) then
 
@@ -1327,6 +1347,11 @@ contains
       !$omp end parallel
 
     end if
+
+    call maintenance_probe_end(37)
+#ifdef USE_GPU
+    call nonbond_virial_end(virial_omp,coord_pbc,force_pbc)
+#endif
 
     ! gather values
     !
@@ -2809,6 +2834,7 @@ contains
     real(dp)                 :: efield_omp (nthread)
     real(wip)                :: force_tmp(1:3)
     integer                  :: ncell, natom, id, i, ix, k, ki, ic, start_i
+    logical                  :: clear_output,small_init
     integer                  :: omp_get_thread_num
 
 
@@ -2828,8 +2854,35 @@ contains
     virial_ext(2,2)             = 0.0_dp
     virial_ext(3,3)             = 0.0_dp
 
+    clear_output=.true.
+    small_init=.false.
+#ifdef USE_GPU
+    if(domain%nonbond_kernel==NBK_GPU.and.force_assembly_enabled().and.bonded_enabled()) &
+      clear_output=force_clear_mode()==0
+    small_init=.not.clear_output.and..not.bonded_cpu_reference()
+    if(.not.clear_output) call force_clear_poison(force)
+#endif
+    call maintenance_probe_begin(35)
+    if(small_init) then
+      virial_omp(1,1,:)=0.0_dp
+      virial_omp(2,2,:)=0.0_dp
+      virial_omp(3,3,:)=0.0_dp
+      virial_ext_omp(1,1,:)=0.0_dp
+      virial_ext_omp(2,2,:)=0.0_dp
+      virial_ext_omp(3,3,:)=0.0_dp
+      ebond_omp=0.0_dp
+      eangle_omp=0.0_dp
+      eurey_omp=0.0_dp
+      edihed_omp=0.0_dp
+      eimprop_omp=0.0_dp
+      elec_omp=0.0_dp
+      evdw_omp=0.0_dp
+      eposi_omp=0.0_dp
+      efield_omp=0.0_dp
+    else
     !$omp parallel private(i,ix,id)
 
+    if(clear_output) then
     !$omp do 
     do i = 1, ncell
       do ix = 1, natom
@@ -2839,6 +2892,7 @@ contains
       end do
     end do
     !$omp end do
+    end if
 
     if (domain%nonbond_kernel /= NBK_GPU) then
       if (domain%nonbond_kernel /= NBK_Fugaku .and. &
@@ -2924,6 +2978,8 @@ contains
     end do
 
     !$omp end parallel
+    end if
+    call maintenance_probe_end(35)
 
     if (domain%nonbond_kernel /= NBK_Fugaku .and. &
         domain%nonbond_kernel /= NBK_Intel)       &
@@ -3075,6 +3131,9 @@ contains
     ! finish GPU
     !
     if (domain%nonbond_kernel == NBK_GPU .and. enefunc%pme_use) then
+#ifdef USE_GPU
+      call nonbond_short_request(domain)
+#endif
       call compute_energy_nonbond_pme_wait( &
                               pairlist, .false., .false.,            &
                               coord_pbc, force_omp, force_pbc,       &

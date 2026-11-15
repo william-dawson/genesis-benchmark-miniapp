@@ -14,6 +14,9 @@
 #endif
 
 module sp_enefunc_charmm_mod
+#ifdef USE_GPU
+  use exclusion_gpu_mod,only:exclusion_gpu
+#endif
   use genesis_pair_sparse_mod, only: pair_sparse_enabled, pair_sparse_reset, pair_sparse_record, pair_sparse_restore
   use exclusion_reset_mod,only:exclusion_reset_enabled,exclusion_reset_verify
   use exclusion_oracle_mod,only:exclusion_save,exclusion_check
@@ -1919,6 +1922,10 @@ contains
     real(wp),        pointer :: dihe_scnb(:), dihe_scee(:)
     real(wp),        pointer :: charge(:,:)
 
+
+#ifdef USE_GPU
+    if(exclusion_gpu(first,constraint,constraints,domain,enefunc,reference))return
+#endif
 
     natom           => domain%num_atom
     nwater          => domain%num_water

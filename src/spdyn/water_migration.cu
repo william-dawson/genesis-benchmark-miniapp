@@ -12,6 +12,9 @@
 extern "C" void genesis_water_scatter(double *,double *,int *,int *,int *,int *,
     const double *,const int *,const int *,int,int,int);
 
+extern "C" int genesis_migration_resident();
+extern "C" int genesis_migration_host_packets();
+extern "C" int genesis_migration_prefix(int,int*,int*,int,int,int);
 namespace {
 void checked(cudaError_t code) {
     if(code!=cudaSuccess) {std::fprintf(stderr,"Water migration CUDA: %s\n",cudaGetErrorString(code));std::abort();}
@@ -115,12 +118,15 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
     s.latched=false;
     const auto begin=std::chrono::steady_clock::now();
     const int globals=grid[0]*grid[1]*grid[2];
+    const bool resident=genesis_migration_resident(),first_allocation=!s.capacity;
     std::vector<int> prefix(s.cells+1);
+    if(!resident || first_allocation){
     for(int c=0;c<s.cells;++c) {
         require(counts[c]>=0&&counts[c]<=s.water_width,"invalid water count");
         prefix[c+1]=prefix[c]+counts[c];
     }
     s.total=prefix.back();
+    }
     require(s.total>0&&globals>0,"empty shape");
     if(!s.capacity) {
         s.capacity=s.water_width*s.cells;s.globals=globals;
@@ -144,9 +150,11 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
     }
     require(globals==s.globals,"global cell shape changed");
     checked(cudaStreamWaitEvent(0,s.ready,0));
+    if(!genesis_migration_prefix(1,s.prefix,s.ids,s.cells,s.width,0)) {
     checked(cudaMemcpy(s.prefix,prefix.data(),size_t(s.cells+1)*sizeof(int),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.ids,ids,size_t(s.width)*s.cells*sizeof(int),cudaMemcpyHostToDevice));
-    checked(cudaMemcpy(s.map,map,size_t(globals)*sizeof(std::int16_t),cudaMemcpyHostToDevice));
+    }
+    if(!resident || first_allocation)checked(cudaMemcpy(s.map,map,size_t(globals)*sizeof(std::int16_t),cudaMemcpyHostToDevice));
     checked(cudaMemset(s.ranges,0xff,4ull*s.cells*sizeof(int)));
     checked(cudaMemset(s.error,0,sizeof(int)));
     if(s.timing)checked(cudaEventRecord(s.start,0));
@@ -162,12 +170,14 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
         s.packed_ids,s.error,s.width,s.water_width,s.total);
     checked(cudaGetLastError());
     if(s.timing)checked(cudaEventRecord(s.finish,0));
+    const auto copied=std::chrono::steady_clock::now();
+    if(genesis_migration_host_packets()) {
     checked(cudaMemcpy(s.host,s.packed,18ull*s.total*sizeof(double),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ids,s.packed_ids,3ull*s.total*sizeof(int),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ranges,s.ranges,4ull*s.cells*sizeof(int),cudaMemcpyDeviceToHost));
     int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));
     require(!error,"invalid classification or atom index");
-    const auto copied=std::chrono::steady_clock::now();
+
     for(int bucket=0;bucket<2*s.cells;++bucket) {
         const int first=s.host_ranges[2*bucket],last=s.host_ranges[2*bucket+1];
         const int count=first<0?0:last-first;
@@ -176,6 +186,9 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
     }
     genesis_water_scatter(stay_real,move_real,stay_ids,move_ids,stay,move,s.host,s.host_ids,s.host_ranges,
         s.cells,stay_capacity,move_capacity);
+    } else {
+      int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));require(!error,"invalid resident migration packet");
+    }
     if(s.timing) {
         float ms=0;checked(cudaEventElapsedTime(&ms,s.start,s.finish));
         const auto end=std::chrono::steady_clock::now();
@@ -203,4 +216,8 @@ extern "C" void genesis_water_check(const int *stay,const int *move,const double
     }
     require(seen==s.total,"water conservation failed");
     std::printf("GENESIS_WATER_VERIFY: exact packing pass %d\n",seen);
+}
+
+extern "C" void genesis_water_payload_view(const double **x,const double **v,const double **real,const int **integer,const int **ranges,int *width,int *cells) {
+    *x=state.x;*v=state.v;*real=state.packed;*integer=state.packed_ids;*ranges=state.ranges;*width=state.width;*cells=state.cells;
 }

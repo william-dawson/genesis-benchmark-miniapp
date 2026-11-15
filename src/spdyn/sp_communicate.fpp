@@ -13,6 +13,9 @@
 #endif
 
 module sp_communicate_mod
+#ifdef USE_GPU
+  use incoming_gpu_mod,only:incoming_boundary_gpu,incoming_boundary_check
+#endif
 
   use sp_constraints_str_mod
   use sp_boundary_str_mod
@@ -1837,6 +1840,7 @@ contains
     integer                  :: i, k, j, ii, ic, ix, iwater, list
     integer                  :: irequest, irequest1, irequest2, irequest3
     integer                  :: irequest4, irequest5, irequest6, irequest7
+    logical                  :: incoming_boundary_handled
     integer                  :: id, omp_get_thread_num
 #ifdef HAVE_MPI_GENESIS
     integer                  :: istatus(mpi_status_size)
@@ -2075,6 +2079,11 @@ contains
 
     end do
 
+    incoming_boundary_handled=.false.
+#ifdef USE_GPU
+    incoming_boundary_handled=incoming_boundary_gpu(domain,constraints,boundary)
+#endif
+    if(.not.incoming_boundary_handled)then
     !$omp parallel default(shared)                                             &
     !$omp private(id, i, j, k, ix, x_shift, y_shift, z_shift, move, ic, iwater,&
     !$omp         list, ii)
@@ -2404,6 +2413,10 @@ contains
 
     end do
     !$omp end parallel
+    end if
+#ifdef USE_GPU
+    call incoming_boundary_check(domain)
+#endif
 
     return
 

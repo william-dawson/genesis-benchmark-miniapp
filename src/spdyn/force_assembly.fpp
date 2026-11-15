@@ -11,9 +11,25 @@ module force_assembly_mod
   private
   public :: force_assembly_enabled,force_assembly_run
   public :: force_resident_set,force_resident_active,force_resident_requested
+  public :: long_force_active,long_force_available
+  public :: force_clear_mode,force_clear_poison,nonbond_short_request
   logical,save::resident_step=.false.
   real(wip),allocatable :: reference(:,:,:),observed(:,:,:)
   interface
+    subroutine nonbond_request_c(eligible) bind(C,name="genesis_nonbond_mirror_request")
+      import c_int
+      integer(c_int),value::eligible
+    end subroutine
+    subroutine long_request_c(eligible) bind(C,name='genesis_long_force_request')
+      import c_int
+      integer(c_int),value::eligible
+    end subroutine
+    integer(c_int) function long_active_c() bind(C,name='genesis_long_force_requested_')
+      import c_int
+    end function
+    integer(c_int) function long_available_c() bind(C,name='genesis_long_force_available')
+      import c_int
+    end function
     subroutine assemble_c(cpu,fl,output,natom,start,width,cells,capacity,outcells,workers,atoms,merge,mode,download) &
         bind(C,name='genesis_force_assemble')
       import c_double,c_int
@@ -24,6 +40,35 @@ module force_assembly_mod
     end subroutine
   end interface
 contains
+  subroutine nonbond_short_request(domain)
+    type(s_domain),intent(in)::domain
+    logical::eligible
+    eligible=force_assembly_enabled().and.domain%num_cell_boundary==0
+    call nonbond_request_c(merge(1,0,eligible))
+  end subroutine
+
+  integer function force_clear_mode() result(selected)
+    integer,save::cached=-1
+    integer::status,code
+    character(16)::value
+    if(cached<0) then
+      cached=0
+      call get_environment_variable('GENESIS_FORCE_CLEAR',value,status=status)
+      if(status==0) then
+        read(value,*,iostat=code) cached
+        if(code/=0.or.cached<0.or.cached>2) error stop 'GENESIS_FORCE_CLEAR must be 0, 1 or 2'
+      end if
+    end if
+    selected=cached
+  end function
+
+  subroutine force_clear_poison(values)
+    real(wip),intent(inout)::values(:,:,:)
+    if(force_clear_mode()/=2) return
+    values=ieee_value(0.0_wip,ieee_quiet_nan)
+    write(*,'(a)') 'GENESIS_FORCE_CLEAR_VERIFY: output mirror poisoned'
+  end subroutine
+
   logical function force_resident_requested()
     integer,save::selected=-1
     integer::status,code
@@ -42,7 +87,15 @@ contains
   subroutine force_resident_set(eligible)
     logical,intent(in)::eligible
     resident_step=eligible.and.force_resident_requested().and.force_assembly_enabled()
+    call long_request_c(merge(1,0,resident_step))
   end subroutine
+
+  logical function long_force_active()
+    long_force_active=long_active_c()/=0
+  end function
+  logical function long_force_available()
+    long_force_available=long_available_c()/=0
+  end function
 
   logical function force_resident_active()
     force_resident_active=resident_step

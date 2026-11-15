@@ -14,6 +14,9 @@
 #endif
 
 module sp_dynvars_mod
+#ifdef USE_GPU
+  use observables_mod,only:observables_take,observables_complete
+#endif
 
   use sp_output_str_mod
   use sp_dynamics_str_mod
@@ -201,6 +204,9 @@ contains
 
     ! rmsg
     !
+#ifdef USE_GPU
+    if(.not.observables_take(dynvars%step,rmsg,ekin_sum))then
+#endif
     rmsg = 0.0_dp
     do i = 1, ncell
       do ix = 1, natom(i)
@@ -218,6 +224,10 @@ contains
                                          +vel_ref(3,ix,i)*vel_ref(3,ix,i))
       end do
     end do
+#ifdef USE_GPU
+    end if
+    call observables_complete(domain,dynvars%step,rmsg,ekin_sum)
+#endif
     ekin_sum = ekin_sum * 0.5_dp
  
     ! virial

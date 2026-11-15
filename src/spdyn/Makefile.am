@@ -104,7 +104,24 @@ hgr_bindings.o: FCFLAGS += -cuda
 hgr_bindings.o: sp_domain_str.o sp_boundary_str.o sp_constraints_str.o
 gpu_step.o sp_migration.o: hgr_bindings.o
 coord_bindings.o: FCFLAGS += -cuda
-coord_bindings.o: sp_domain_str.o
+remap_coordinate.o: FCFLAGS += -cuda
+remap_coordinate.o: sp_domain_str.o
+final_reductions.o: FCFLAGS += -cuda
+gpu_step.o gpu_thermo.o: final_reductions.o
+incoming_gpu.o: incoming_oracle.o sp_domain_str.o sp_constraints_str.o sp_enefunc_str.o
+sp_migration.o sp_communicate.o translation_rebuild.o: incoming_gpu.o
+bonded_incoming.o: bonded_migration.o sp_domain_str.o sp_enefunc_str.o
+sp_migration.o: bonded_incoming.o
+gpu_step.o: remap_coordinate.o
+nonbond_virial.o: sp_domain_str.o force_assembly.o
+sp_energy.o sp_energy_nonbond_gpu.o: nonbond_virial.o
+maintenance_state.o: FCFLAGS += -cuda
+maintenance_state.o: sp_domain_str.o
+gpu_step.o: maintenance_state.o
+translation_rebuild.o: translation_bindings.o sp_communicate.o sp_domain_str.o sp_constraints_str.o sp_boundary_str.o
+sp_update_domain.o sp_md_respa.o: translation_rebuild.o
+translation_bindings.o: sp_domain_str.o
+coord_bindings.o: sp_domain_str.o translation_bindings.o
 gpu_step.o: coord_bindings.o
 bonded_force.o sp_energy_nonbond_gpu.o sp_md_respa.o: coord_bindings.o
 gpu_step.o: gpu_thermo.o
@@ -119,8 +136,42 @@ sp_energy.o: force_assembly.o bonded_force.o
 spdyn_SOURCES += \
 	bonded_force.fpp \
 	force_assembly.fpp \
+	force_totals_gpu.cu \
+	force_topology_bindings.fpp \
+	metadata_import.fpp \
+	state_cycle.fpp \
+	state_cycle_gpu.cu \
+	observables.fpp \
+	observables_gpu.cu \
+	metadata_import_gpu.cu \
+	force_topology_gpu.cu \
+	migration_views.h \
+	bonded_incoming_view.h \
+	long_force_gpu.cu \
 	gpu_state_ops.cu \
 	gpu_force_assembly.cu \
+	remap_coordinate.fpp \
+	remap_coordinate_gpu.cu \
+	nonbond_mirror_gpu.cu \
+	nonbond_virial.fpp \
+	nonbond_virial_gpu.cu \
+	final_reductions.fpp \
+	final_reductions_gpu.cu \
+	incoming_gpu.fpp \
+	incoming_gpu_ops.cu \
+	atom_outgoing_gpu.cu \
+	migration_resident_gpu.cu \
+	bonded_incoming.fpp \
+	bonded_incoming_gpu.cu \
+	bonded_incoming_hbm.cu \
+	bonded_incoming_cooperative.cu \
+	improper_outgoing.fpp \
+	improper_outgoing_gpu.cu \
+	maintenance_state.fpp \
+	maintenance_state_gpu.cu \
+	translation_rebuild.fpp \
+	translation_bindings.fpp \
+	translation_gpu.cu \
 	coord_bindings.fpp \
 	gpu_coord_pack.cu \
 	hgr_bindings.fpp \
@@ -136,6 +187,11 @@ spdyn_SOURCES += \
 	pair_sort_gpu.cu \
 	bonded_migration.fpp \
 	bonded_migration_gpu.cu \
+	bonded_residency_gpu.cu \
+	exclusion_gpu.fpp \
+	exclusion_gpu_ops.cu \
+	pair_prepare.fpp \
+	pair_prepare_gpu.cu \
 	pme_mesh_sum.fpp \
 	pme_host_pack.fpp \
 	gpu_common.h \
@@ -209,6 +265,35 @@ clean_depend:
 	rm -f $(DEPENDS)
 
 sp_update_domain.o sp_enefunc.o sp_md_respa.o: maintenance_probe.o
+sp_energy.o sp_energy_nonbond_gpu.o: maintenance_probe.o
+if CUDAGPU
+gpu_step.o: maintenance_probe.o
+endif
+
+if CUDAGPU
+incoming_gpu_ops.o atom_outgoing_gpu.o migration_resident_gpu.o pair_prepare_gpu.o exclusion_gpu_ops.o improper_outgoing_gpu.o: migration_views.h
+bonded_incoming_gpu.o bonded_incoming_hbm.o bonded_incoming_cooperative.o improper_outgoing_gpu.o force_topology_gpu.o: bonded_incoming_view.h
+force_topology_bindings.o: FCFLAGS += -cuda
+bonded_force.o: force_topology_bindings.o
+metadata_import.o: FCFLAGS += -cuda
+metadata_import.o: sp_domain_str.o sp_constraints_str.o
+gpu_step.o: metadata_import.o
+metadata_import_gpu.o: migration_views.h
+state_cycle.o: FCFLAGS += -cuda
+state_cycle.o: sp_domain_str.o
+gpu_step.o: state_cycle.o
+state_cycle_gpu.o: migration_views.h
+observables.o: FCFLAGS += -cuda
+observables.o: sp_domain_str.o
+gpu_step.o gpu_thermo.o sp_dynvars.o: observables.o
+improper_outgoing.o: sp_domain_str.o sp_enefunc_str.o bonded_incoming.o
+sp_migration.o: improper_outgoing.o
+pair_prepare.o: sp_domain_str.o
+sp_pairlist_gpu.o: pair_prepare.o
+
+exclusion_gpu.o: sp_domain_str.o sp_enefunc_str.o sp_constraints_str.o domain_masks.o
+sp_enefunc_charmm.o: exclusion_gpu.o
+endif
 
 incoming_oracle.o: sp_domain_str.o sp_constraints_str.o
 sp_migration.o: incoming_oracle.o

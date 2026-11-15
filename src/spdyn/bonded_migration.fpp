@@ -6,6 +6,7 @@ module bonded_migration_mod
   use mpi_parallel_mod
   implicit none
   private
+  public::bonded_identity_fields
   public::bonded_outgoing,bonded_check,bonded_verify,bonded_update_ids,bonded_check_ids
   integer,allocatable,save::starts(:),saved_add(:),saved_exit(:),add_start(:),exit_start(:)
   integer,allocatable,target,save::saved_indices(:),saved_int(:,:)
@@ -20,6 +21,20 @@ module bonded_migration_mod
   integer,pointer,contiguous,save::batch_exits(:),batch_ids(:),batch_int(:,:),source_ranges(:,:),destination_ranges(:,:)
   real(wp),pointer,contiguous,save::batch_real(:,:)
   interface
+    integer(c_int) function resident_c() bind(C,name='genesis_bonded_residency_enabled')
+      import c_int
+    end function
+    subroutine register_c(kind,ids,counts,adds,exits,indices,integers,reals,cells,idcap,exitcap,ni,intcap,nr,realcap) &
+        bind(C,name='genesis_bonded_residency_register')
+      import c_int,c_ptr
+      integer(c_int),value::kind,cells,idcap,exitcap,ni,intcap,nr,realcap
+      type(c_ptr),value::ids,counts,adds,exits,indices,integers,reals
+    end subroutine
+    subroutine scatter_c(kind,incoming,capacity) bind(C,name='genesis_bonded_scatter_resident')
+      import c_int,c_ptr
+      integer(c_int),value::kind,capacity
+      type(c_ptr),value::incoming
+    end subroutine
     function staging(n) bind(C,name='genesis_bonded_staging') result(p)
       import c_ptr,c_int
       integer(c_int),value::n
@@ -46,6 +61,14 @@ module bonded_migration_mod
     end function
   end interface
 contains
+  subroutine bonded_identity_fields(kind,target,source,capacity,source_capacity)
+    integer,intent(in)::kind
+    type(c_ptr),intent(out)::target,source
+    integer,intent(out)::capacity,source_capacity
+    if(kind<1.or.kind>3.or..not.allocated(topology(kind)%ids))error stop 'Missing bonded identities'
+    target=c_loc(topology(kind)%ids);source=c_loc(topology(kind)%incoming)
+    capacity=size(topology(kind)%ids,1);source_capacity=size(topology(kind)%incoming,1)
+  end subroutine
   logical function flag(name)
     character(*),intent(in)::name
     character(16)::value
@@ -130,15 +153,22 @@ contains
     else
       allocate(starts(cells))
     end if
-    total=sum(e%num_bond(1:cells))+sum(e%num_angle(1:cells))+sum(e%num_dihedral(1:cells))
+    if(resident_c()/=0.and.allocated(topology(1)%ids))then
+      total=sum(topology%total)
+    else
+      total=sum(e%num_bond(1:cells))+sum(e%num_angle(1:cells))+sum(e%num_dihedral(1:cells))
+    end if
     call c_f_pointer(staging(max(1,total)),records,[4,max(1,total)])
     offset=0
     do kind=1,3
       call fields(kind,e,counts,adds,exits,indices,integer_buffer,real_buffer,lists)
-      n=0
-      do cell=1,cells
-        starts(cell)=n;n=n+counts(cell)
-      end do
+      n=topology(kind)%total
+      if(.not.allocated(topology(kind)%ids).or.resident_c()==0)then
+        n=0
+        do cell=1,cells
+          starts(cell)=n;n=n+counts(cell)
+        end do
+      end if
       if(.not.allocated(topology(kind)%ids))then
         topology(kind)%total=n
         allocate(topology(kind)%ids(size(lists,2),cells),topology(kind)%incoming(size(integer_buffer,2),cells), &
@@ -156,6 +186,7 @@ contains
       end if
       if(n/=topology(kind)%total.or.size(lists,2)/=size(topology(kind)%ids,1)) &
         error stop 'Bonded topology changed'
+      if(resident_c()==0)then
       !$omp parallel do private(slot,index) schedule(static)
       do cell=1,cells
         do slot=1,counts(cell)
@@ -165,6 +196,10 @@ contains
         end do
       end do
       !$omp end parallel do
+      end if
+      if(resident_c()/=0)call register_c(kind,c_loc(topology(kind)%ids),c_loc(counts),c_loc(adds),c_loc(exits), &
+          c_loc(indices),c_loc(integer_buffer),c_loc(real_buffer),cells,size(topology(kind)%ids,1), &
+          size(indices,1),size(integer_buffer,1),size(integer_buffer,2),size(real_buffer,1),size(real_buffer,2))
       offset=offset+n
     end do
     ready_time=now();prep_us=(ready_time-start)*1d6
@@ -202,6 +237,9 @@ contains
     if(kind==1)call prepare(domain,e,prep_us,driver_us)
     call fields(kind,e,counts,adds,exits,indices,integer_buffer,real_buffer,lists)
     ni=size(integer_buffer,1);nr=size(real_buffer,1);start=now()
+    if(resident_c()/=0)then
+      call scatter_c(kind,c_loc(topology(kind)%incoming),size(topology(kind)%incoming,1))
+    else
     !$omp parallel do private(b,first,last,n) schedule(static)
     do cell=1,cells
       b=cell+(kind-1)*cells
@@ -221,6 +259,7 @@ contains
       end if
     end do
     !$omp end parallel do
+    end if
     if(timing)write(*,'(a,3i12,3es20.10)') 'GENESIS_BONDED_MIGRATION_HOST: ', &
       kind,topology(kind)%total,sum(adds(1:cells)),prep_us,driver_us,(now()-start)*1d6
     if(bonded_verify())call save(cells,adds,exits,indices,integer_buffer,real_buffer)

@@ -5,6 +5,7 @@ module coordinate_pack_mod
   use iso_c_binding,only:c_int,c_double,c_intptr_t
   use cudafor
   use sp_domain_str_mod
+  use translation_residency_mod,only:translation_configure,translation_refresh
   use mpi_parallel_mod
   implicit none
   private
@@ -89,9 +90,11 @@ contains
     if(nproc_country/=1.or.domain%num_cell_boundary/=0) error stop 'Resident coordinates require one rank without halos'
     call configure_c(values,domain%trans_vec(1,1,1),domain%charge(1,1),domain%num_atom,domain%start_atom, &
       size(values,2),size(values,3),domain%num_atom_domain)
+    call translation_configure(domain)
   end subroutine
   subroutine coordinate_check(domain)
-    type(s_domain),intent(in)::domain
+    type(s_domain),intent(inout)::domain
+    if(coordinate_verify()/=0) call translation_refresh(domain)
     call check_c(domain%coord(1,1,1),domain%trans_vec(1,1,1),domain%charge(1,1),domain%num_atom,domain%start_atom)
   end subroutine
 end module

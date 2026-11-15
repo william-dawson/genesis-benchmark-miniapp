@@ -3,7 +3,7 @@
 #endif
 module genesis_pair_sparse_mod
   use exclusion_reset_mod,only:exclusion_restore_masks
-  use iso_c_binding, only: c_ptr, c_loc, c_int, c_f_pointer
+  use iso_c_binding, only: c_ptr, c_loc, c_int, c_f_pointer, c_null_ptr
 #ifdef OMP
   use omp_lib, only: omp_get_thread_num, omp_get_max_threads
 #endif
@@ -15,6 +15,9 @@ module genesis_pair_sparse_mod
   integer, allocatable, target, save :: records(:,:,:), compact(:,:), inverse(:)
   integer, allocatable, save :: used(:,:)
   interface
+    integer(c_int) function exclusion_active() bind(C,name='genesis_exclusion_active')
+      import c_int
+    end function
     function gpu_sparse_staging(count) bind(c,name='gpu_sparse_staging_') result(address)
       import :: c_ptr, c_int
       integer(c_int), value :: count
@@ -102,6 +105,12 @@ contains
     integer, pointer, contiguous :: target_records(:,:)
     type(c_ptr) :: address
     character(16) :: value
+#ifdef USE_GPU
+    if(exclusion_active()/=0)then
+      call gpu_sparse_mask(c_null_ptr,c_null_ptr,0,width,pitch,local,near)
+      return
+    end if
+#endif
     if (.not. allocated(used)) error stop 'Missing sparse exclusion records'
     total=sum(used)
     pinned=0
