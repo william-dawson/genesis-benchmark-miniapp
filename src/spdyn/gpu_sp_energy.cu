@@ -8,6 +8,7 @@
 #include <assert.h>
 #include "gpu_common.h"
 #include "precision_types.h"
+#include "nonbond_inter_staged.h"
 extern "C" int genesis_coord_copy(void *,int,int,uintptr_t,int);
 extern "C" int genesis_nonbond_mirror_skip(void *,size_t,int,int);
 extern "C" void genesis_nonbond_mirror_consume();
@@ -6099,7 +6100,50 @@ if (gpu_timer_print_once == 0) {
         CUDA_CALL(cudaMemsetAsync(dev_ene_viri_mid + (size_t)(index_s - 1) * 5, 0,
                                  (size_t)(index_e - index_s + 1) * 5 * sizeof(double), stream[0]));
     }
-    kern_compute_force_nonbond_table_linear_univ__force_inter_cell<<< num_block, num_thread, smem_size, stream[0] >>>(
+    const int nonbond_mode=genesis::nonbond_inter_mode();
+    if(nonbond_mode!=0) {
+        genesis::launch_nonbond_inter(num_block,num_thread,smem_size,stream[0],nonbond_mode,
+
+	dev_coord_pbc,
+	dev_force,
+	dev_ene_virial,
+	dev_ene_viri_mid,
+	dev_cell_move,
+	dev_atmcls_pbc,
+	dev_natom,
+	dev_start_atom,
+	dev_nonb_lj12,
+	dev_nonb_lj6,
+	dev_table_grad,
+	dev_univ_cell_pairlist1,
+        (const int8_t *)dev_pack_univ_mask2,
+	dev_univ_ix_natom,
+	dev_univ_ix_list,
+	dev_univ_iy_natom,
+	dev_univ_iy_list,
+	dev_univ_ij_sort_list,
+	dev_virial_check,
+	atom_domain,
+	MaxAtom,
+	MaxAtomCls,
+	num_atom_cls,
+	ncel_local,
+	ncel_bound,
+	ncel_max,
+	cutoff_int,
+	univ_maxcell,
+	univ_maxcell1,
+        univ_ncell_near,
+        univ_mask2_size,
+        univ_natom_max,
+	index_s, index_e, max_iy_natom,
+	check_virial,
+	density,
+	cutoff2,
+	pairlistdist2,
+        system_x, system_y, system_z, inter_tile_log2);
+    } else {
+        kern_compute_force_nonbond_table_linear_univ__force_inter_cell<<< num_block, num_thread, smem_size, stream[0] >>>(
 	dev_coord_pbc,
 	dev_force,
 	dev_ene_virial,
@@ -6138,6 +6182,7 @@ if (gpu_timer_print_once == 0) {
 	cutoff2,
 	pairlistdist2,
         system_x, system_y, system_z, inter_tile_log2 );
+    }
 
 #ifdef GENESIS_GPU_TIMER
     CUDA_CALL(cudaGetLastError());

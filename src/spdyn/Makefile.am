@@ -185,6 +185,8 @@ spdyn_SOURCES += \
 	gpu_thermo.fpp \
 	gpu_step.fpp \
 	gpu_sp_energy.cu \
+	nonbond_inter_staged.cu \
+	nonbond_inter_staged.h \
 	gpu_pme.cu \
 	pair_sparse_gpu.cu \
 	pair_compact_gpu.cu \
@@ -318,3 +320,7 @@ sp_migration.o: bonded_migration.o
 endif
 
 -include $(DEPENDS)
+
+if CUDAGPU
+gpu_sp_energy.o nonbond_inter_staged.o: nonbond_inter_staged.h precision_types.h gpu_common.h
+endif

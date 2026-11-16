@@ -1,5 +1,38 @@
 # Experimental RIKYU optimization snapshot
 
+## FP64 inter-cell nonbond tuning
+
+Enable the tuned kernel with `GENESIS_NONBOND_INTER=38` when using the
+resident launcher. Unset or 0 selects the original inter-cell kernel.
+The new option currently requires double precision; Single and mixed keep
+their existing paths and defaults.
+
+The accepted kernel stages J coordinates/charge/classes/indices, removes a
+padded zero-work iteration, uses a correctly rounded reciprocal followed
+by multiplication, and selects one inter-cell tile with an 80-atom J chunk.
+It evaluates the same pairs and retains the potential table and exclusions.
+
+One RIKYU B200, one MPI rank x32 threads, ApoA1 92,224 atoms:
+
+| Comparison | Staged control | Selected |
+|---|---:|---:|
+| Inter-cell force kernel | 714.90 us | 675.31 us |
+| 6000-step dynamics median | 11.368 s | 11.175 s |
+| Total-time median | 13.337 s | 13.123 s |
+
+Production timing355268 has three interleaved normal repeats per arm;
+every selected run beats every control. Strict frozen355240 passes both
+coordinate frames. Full normal/tighter-SHAKE355269/355270 each pass all
+46 numerical/ownership gate families, including6,002force comparisons.
+The original FP64 limits and IEEE policy are unchanged. NCU355271 measures
+91.13% L1/TEX data-pipe utilization; rejected tuning variants are excluded
+from this source change.
+
+Source/binary identities, equations, rejected hypotheses and reproduction:
+[nonbond tuning report](https://github.com/RIKEN-RCCS/block1-eeas/tree/main/report/genesis-nonbond-tuning).
+
+## Native precision resident preset
+
 The resident preset now supports native Single (WP32/WIP32), mixed
 (WP32/WIP64) and double (WP64/WIP64). The precision port preserves each
 field's storage/ABI role throughout PME, force assembly, integration,
