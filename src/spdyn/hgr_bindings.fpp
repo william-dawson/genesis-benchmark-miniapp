@@ -3,6 +3,7 @@
 #endif
 module hgr_migration_mod
   use iso_c_binding,only:c_int,c_int16_t,c_double
+  use constants_mod,only:wp,wip
   use cudafor
   use sp_domain_str_mod
   use sp_boundary_str_mod
@@ -19,26 +20,28 @@ module hgr_migration_mod
       import c_int
     end function
     subroutine hgr_latch_c(x,v,groups,counts,dist,width,cells,group_width,sites,connect) bind(C,name='genesis_hgr_latch')
-      import c_int,c_double
-      real(c_double),device,intent(in)::x(*),v(*),dist(*)
+      import c_int,wip
+      real(wip),device,intent(in)::x(*),v(*),dist(*)
       integer(c_int),device,intent(in)::groups(*),counts(*)
       integer(c_int),value::width,cells,group_width,sites,connect
     end subroutine
     integer(c_int) function outgoing_c(counts,groups,ids,solute,cls,charge,mass,map,box,origin,cell_size,grid,atoms, &
         stay,move,stay_real,move_real,stay_integer,move_integer,stay_capacity,move_capacity) bind(C,name='genesis_hgr_outgoing')
-      import c_int,c_int16_t,c_double
+      import c_int,c_int16_t,c_double,wp,wip
       integer(c_int),intent(in)::counts(*),groups(*),ids(*),solute(*),cls(*),grid(*)
       integer(c_int16_t),intent(in)::map(*)
-      real(c_double),intent(in)::charge(*),mass(*),box(*),origin(*),cell_size(*)
+      real(wp),intent(in)::charge(*)
+      real(wip),intent(in)::mass(*)
+      real(c_double),intent(in)::box(*),origin(*),cell_size(*)
       integer(c_int),value::atoms,stay_capacity,move_capacity
       integer(c_int),intent(out)::stay(*),move(*),stay_integer(*),move_integer(*)
-      real(c_double),intent(out)::stay_real(*),move_real(*)
+      real(wip),intent(out)::stay_real(*),move_real(*)
     end function
     subroutine check_c(stay,move,stay_real,move_real,stay_integer,move_integer,stay_capacity,move_capacity) &
         bind(C,name='genesis_hgr_check')
-      import c_int,c_double
+      import c_int,wip
       integer(c_int),intent(in)::stay(*),move(*),stay_integer(*),move_integer(*)
-      real(c_double),intent(in)::stay_real(*),move_real(*)
+      real(wip),intent(in)::stay_real(*),move_real(*)
       integer(c_int),value::stay_capacity,move_capacity
     end subroutine
   end interface
@@ -46,10 +49,10 @@ contains
   subroutine scatter(stay_real,move_real,stay_integer,move_integer,stay,move,packed,integer,ranges, &
       cells,connect,sites,stay_capacity,move_capacity) bind(C,name='genesis_hgr_scatter')
     integer(c_int),value::cells,connect,sites,stay_capacity,move_capacity
-    real(c_double),intent(out)::stay_real(9*sites,stay_capacity,connect,cells),move_real(9*sites,move_capacity,connect,cells)
+    real(wip),intent(out)::stay_real(9*sites,stay_capacity,connect,cells),move_real(9*sites,move_capacity,connect,cells)
     integer(c_int),intent(out)::stay_integer(3*sites,stay_capacity,connect,cells)
     integer(c_int),intent(out)::move_integer(3*sites,move_capacity,connect,cells),stay(connect,cells),move(connect,cells)
-    real(c_double),intent(in)::packed(9*sites,*)
+    real(wip),intent(in)::packed(9*sites,*)
     integer(c_int),intent(in)::integer(3*sites,*),ranges(2,2*connect*cells)
     integer::cell,j,b,first,last,count
     !$omp parallel do private(j,b,first,last,count) schedule(static)

@@ -6,11 +6,13 @@
 #include <vector>
 #include <cstdint>
 #include "bonded_incoming_view.h"
+#include "precision_types.h"
+using genesis::WorkingReal;
 #define CHECK(c) do{cudaError_t e=(c);if(e!=cudaSuccess){std::fprintf(stderr,"force topology: %s\n",cudaGetErrorString(e));std::abort();}}while(0)
 extern "C" int genesis_bonded_hbm_working_view(int,MoveView*);
 extern "C" int genesis_exclusion_force_view(int,const int**,const int**,const int**,int*);
 namespace {
-struct Output {int kind,cells,expected,capacity,*offset,*owner,*local,*counts,*starts,*list,*pbc,*period;double *real[4];int8_t *move;};
+struct Output {int kind,cells,expected,capacity,*offset,*owner,*local,*counts,*starts,*list,*pbc,*period;WorkingReal *real[4];int8_t *move;};
 Output outputs[6]{};int8_t *cell_move=nullptr;int move_pitch=0,*error=nullptr;void *scratch=nullptr;size_t scratch_bytes=0;bool active=false,pending=false;
 struct Buffer {void *pointer;size_t bytes;std::vector<unsigned char> candidate;};std::vector<Buffer> buffers;
 int mode(){static int m=[](){const char *s=std::getenv("GENESIS_FORCE_TOPOLOGY_GPU");if(!s || !std::strcmp(s,"0"))return 0;if(!std::strcmp(s,"1"))return 1;if(!std::strcmp(s,"2"))return 2;std::abort();}();return m;}
@@ -22,7 +24,7 @@ __global__ void pack_fields(MoveView v,Output out,int *bad){int c=blockIdx.x,n=v
  int pf=out.kind==1?2:(out.kind==3?3:2),rf=out.kind==1?3:(out.kind==3?4:3);auto pbc=v.field[pf];
  for(int a=0;a<pbc.rows;++a)out.pbc[a+pbc.rows*k]=static_cast<const int*>(pbc.target)[a+pbc.rows*(j+pbc.capacity*c)];
  int reals=out.kind==2?4:2;
- for(int a=0;a<reals;++a){auto f=v.field[rf+a];out.real[a][k]=static_cast<const double*>(f.target)[j+f.capacity*c];}
+ for(int a=0;a<reals;++a){auto f=v.field[rf+a];out.real[a][k]=static_cast<const WorkingReal*>(f.target)[j+f.capacity*c];}
  if(out.kind==3){auto f=v.field[1];out.period[k]=static_cast<const int*>(f.target)[j+f.capacity*c];}
  }
 }
@@ -36,11 +38,11 @@ __global__ void pack_exclusions(const int *counts,const int *list,int capacity,O
 void remember(void *pointer,size_t bytes,cudaStream_t queue){Buffer b{pointer,bytes,{}};b.candidate.resize(bytes);CHECK(cudaMemcpyAsync(b.candidate.data(),pointer,bytes,cudaMemcpyDeviceToHost,queue));buffers.push_back(std::move(b));}
 void snapshot(Output o,cudaStream_t q){remember(o.offset,4ull*o.cells,q);remember(o.counts,4ull*o.cells,q);remember(o.owner,4ull*o.expected,q);remember(o.local,4ull*o.expected,q);
  int rows=o.kind==1?2:(o.kind==2?3:4);remember(o.list,4ull*rows*o.expected,q);
- if(o.kind<=4){remember(o.pbc,4ull*(o.kind==1?1:3)*o.expected,q);for(int a=0;a<(o.kind==2?4:2);++a)remember(o.real[a],8ull*o.expected,q);if(o.kind==3)remember(o.period,4ull*o.expected,q);}
+ if(o.kind<=4){remember(o.pbc,4ull*(o.kind==1?1:3)*o.expected,q);for(int a=0;a<(o.kind==2?4:2);++a)remember(o.real[a],sizeof(WorkingReal)*o.expected,q);if(o.kind==3)remember(o.period,4ull*o.expected,q);}
  else {remember(o.move,3ull*o.expected,q);remember(o.starts,4ull*o.cells,q);}
 }
 }
-extern "C" void genesis_force_topology_fields(int kind,int cells,int expected,int capacity,int *offset,int *owner,int *local,int *counts,int *list,int *pbc,int *period,double *r0,double *r1,double *r2,double *r3){
+extern "C" void genesis_force_topology_fields(int kind,int cells,int expected,int capacity,int *offset,int *owner,int *local,int *counts,int *list,int *pbc,int *period,WorkingReal *r0,WorkingReal *r1,WorkingReal *r2,WorkingReal *r3){
  if(kind<1 || kind>4)std::abort();outputs[kind-1]={kind,cells,expected,capacity,offset,owner,local,counts,nullptr,list,pbc,period,{r0,r1,r2,r3},nullptr};
 }
 extern "C" void genesis_force_topology_exclusion(int kind,int cells,int expected,int capacity,int *offset,int *owner,int *local,int *counts,int *starts,int *list,int8_t *move,const int8_t *host_move,int pitch){

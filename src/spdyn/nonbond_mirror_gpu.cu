@@ -3,6 +3,8 @@
 #include <cstring>
 #include <cstddef>
 #include <limits>
+#include "precision_types.h"
+using genesis::WorkingReal;
 
 namespace {
 bool armed=false,pending=false;
@@ -30,12 +32,12 @@ extern "C" int genesis_nonbond_mirror_skip(void *host,std::size_t bytes,int viri
     require(!pending,"prior GPU force was not assembled");
     const bool requested=armed;armed=false;
     if(!requested)return 0;
-    require(!virial&&real_bytes==sizeof(double)&&host&&bytes&&bytes%sizeof(double)==0,"invalid short force request");
+    require(!virial&&real_bytes==sizeof(WorkingReal)&&host&&bytes&&bytes%sizeof(WorkingReal)==0,"invalid short force request");
     if(selected("GENESIS_FORCE_VERIFY","1"))return 0;
     pending=true;
     if(mode()==2) {
-        double *values=static_cast<double*>(host);
-        for(std::size_t i=0;i<bytes/sizeof(double);++i)values[i]=std::numeric_limits<double>::quiet_NaN();
+        WorkingReal *values=static_cast<WorkingReal*>(host);
+        for(std::size_t i=0;i<bytes/sizeof(WorkingReal);++i)values[i]=std::numeric_limits<WorkingReal>::quiet_NaN();
         std::printf("GENESIS_NONBOND_MIRROR: retired short force poisoned\n");
     }
     return 1;

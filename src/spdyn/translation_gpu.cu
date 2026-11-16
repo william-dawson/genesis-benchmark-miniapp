@@ -4,14 +4,16 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "precision_types.h"
+using genesis::WorkingReal;
 
 namespace {
 struct State {
-    const double *device=nullptr,*host=nullptr;
+    const WorkingReal *device=nullptr,*host=nullptr;
     int width=0,cells=0;
     bool dirty=false,rebuilding=false,rebuilt_device=false;
     std::vector<int> counts;
-    std::vector<double> observed;
+    std::vector<WorkingReal> observed;
 } state;
 void checked(cudaError_t code) {
     if(code!=cudaSuccess) {
@@ -69,7 +71,7 @@ extern "C" void genesis_translation_invalidate() {
 extern "C" void genesis_translation_require_host() {
     if(genesis_translation_mode())require(!state.dirty&&!state.rebuilding,"CPU consumer or reconfiguration has a stale mirror");
 }
-void configure(const double *device,const double *host,const int *counts,int width,int cells,bool resident) {
+void configure(const WorkingReal *device,const WorkingReal *host,const int *counts,int width,int cells,bool resident) {
     if(!genesis_translation_mode())return;
     if(!resident)genesis_translation_require_host();
     else require(!state.rebuilding,"device reconfiguration during rebuild");
@@ -80,34 +82,34 @@ void configure(const double *device,const double *host,const int *counts,int wid
     s.counts.assign(counts,counts+cells);
     if(genesis_translation_mode()==2)s.observed.resize(3ull*width*cells);
 }
-extern "C" void genesis_translation_configure(const double *device,const double *host,const int *counts,int width,int cells) {
+extern "C" void genesis_translation_configure(const WorkingReal *device,const WorkingReal *host,const int *counts,int width,int cells) {
     configure(device,host,counts,width,cells,false);
 }
-extern "C" void genesis_translation_configure_device(const double *device,const double *host,const int *counts,int width,int cells) {
+extern "C" void genesis_translation_configure_device(const WorkingReal *device,const WorkingReal *host,const int *counts,int width,int cells) {
     configure(device,host,counts,width,cells,true);
 }
-extern "C" void genesis_translation_publish(const double *reference) {
+extern "C" void genesis_translation_publish(const WorkingReal *reference) {
     if(!genesis_translation_mode())return;
     auto &s=state;
     require(s.device&&!s.rebuilding,"publication before configuration or rebuild completion");
     s.dirty=true;
     if(genesis_translation_mode()!=2)return;
-    checked(cudaMemcpy(s.observed.data(),s.device,s.observed.size()*sizeof(double),cudaMemcpyDeviceToHost));
+    checked(cudaMemcpy(s.observed.data(),s.device,s.observed.size()*sizeof(WorkingReal),cudaMemcpyDeviceToHost));
     for(int cell=0;cell<s.cells;++cell)for(int atom=0;atom<s.counts[cell];++atom) {
         const size_t offset=3ull*(size_t(cell)*s.width+atom);
         for(int axis=0;axis<3;++axis) {
             require(std::isfinite(reference[offset+axis])&&std::isfinite(s.observed[offset+axis]),"nonfinite translation");
-            require(std::memcmp(reference+offset+axis,s.observed.data()+offset+axis,sizeof(double))==0,"CPU/GPU scaling differs");
+            require(std::memcmp(reference+offset+axis,s.observed.data()+offset+axis,sizeof(WorkingReal))==0,"CPU/GPU scaling differs");
         }
     }
     std::printf("GENESIS_TRANSLATION_VERIFY: exact scaling pass\n");
 }
-extern "C" void genesis_translation_refresh(double *host) {
+extern "C" void genesis_translation_refresh(WorkingReal *host) {
     if(!genesis_translation_mode())return;
     auto &s=state;
     if(s.rebuilding||!s.dirty)return;
     require(host==s.host,"refresh target changed");
-    checked(cudaMemcpy(host,s.device,3ull*s.width*s.cells*sizeof(double),cudaMemcpyDeviceToHost));
+    checked(cudaMemcpy(host,s.device,3ull*s.width*s.cells*sizeof(WorkingReal),cudaMemcpyDeviceToHost));
     s.dirty=false;
     if(genesis_translation_mode()==2)std::printf("GENESIS_TRANSLATION_VERIFY: CPU mirror refreshed\n");
 }

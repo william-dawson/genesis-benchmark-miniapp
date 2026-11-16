@@ -6,17 +6,20 @@
 #include <cstring>
 
 #include "migration_views.h"
+#include "migration_coordinates.h"
+using genesis::WorkingReal;
+using genesis::IntegrationReal;
 struct Records {
-    const double *move_real,*stay_real;
+    const genesis::IntegrationReal *move_real,*stay_real;
     const int *move_int,*stay_int,*move_count,*stay_count;
     int move_real_rows,move_real_capacity,stay_real_rows,stay_real_capacity;
     int move_int_rows,move_int_capacity,stay_int_rows,stay_int_capacity;
 };
 extern "C" int genesis_state_cycle_publish(ParticleView,ParticleView,int);
-extern "C" int genesis_pack_resident_boundary(ParticleView,ParticleView,const double*,double*,double*);
-extern "C" void genesis_water_payload_view(const double**,const double**,const double**,const int**,const int**,int*,int*);
-extern "C" void genesis_hgr_payload_view(const double**,const int**,const int**,int*,int*,int*);
-struct PackedView {const double *real=nullptr;const int *integer=nullptr,*ranges=nullptr;int sites=0;};
+extern "C" int genesis_pack_resident_boundary(ParticleView,ParticleView,const IntegrationReal*,IntegrationReal*,WorkingReal*);
+extern "C" void genesis_water_payload_view(const IntegrationReal**,const IntegrationReal**,const IntegrationReal**,const int**,const int**,int*,int*);
+extern "C" void genesis_hgr_payload_view(const genesis::IntegrationReal**,const int**,const int**,int*,int*,int*);
+struct PackedView {const genesis::IntegrationReal *real=nullptr;const int *integer=nullptr,*ranges=nullptr;int sites=0;};
 namespace {
 void require(bool ok,const char *message) {
     if(!ok){std::fprintf(stderr,"GENESIS incoming GPU: %s\n",message);std::abort();}
@@ -54,7 +57,8 @@ bool oracle() {
 struct CachedDomain {
     bool valid=false;
     ParticleView host,device;
-    double *inverse=nullptr,*translation=nullptr,*water_charge=nullptr,*water_mass=nullptr;
+    IntegrationReal *inverse=nullptr;
+    WorkingReal *translation=nullptr,*water_charge=nullptr,*water_mass=nullptr;
     int *water_classes=nullptr;
 } cache;
 template<class T> T *clone(const T *host,size_t count) {
@@ -64,12 +68,12 @@ template<class T> T *clone(const T *host,size_t count) {
 void initialize(const ParticleView &p) {
     if(cache.valid) {require(cache.host.x==p.x&&cache.host.width==p.width&&cache.host.cells==p.cells,"cached domain shape changed");return;}
     require(p.noh&&p.groups&&p.hlocal,"cached domain needs constraint metadata");
-    const double *x=nullptr,*v=nullptr,*packed=nullptr;const int *integer=nullptr,*ranges=nullptr;
+    const IntegrationReal *x=nullptr,*v=nullptr,*packed=nullptr;const int *integer=nullptr,*ranges=nullptr;
     int width=0,cells=0;genesis_water_payload_view(&x,&v,&packed,&integer,&ranges,&width,&cells);
     require(x&&v&&width==p.width&&cells==p.cells,"resident MD state is unavailable");
     cache.host=p;cache.device=p;auto &d=cache.device;
     // Reuse the MD state after its outgoing consumers have completed packing.
-    d.x=const_cast<double*>(x);d.v=const_cast<double*>(v);
+    d.x=const_cast<IntegrationReal*>(x);d.v=const_cast<IntegrationReal*>(v);
     const size_t atoms=size_t(p.width)*p.cells;
     d.q=clone(p.q,atoms);d.m=clone(p.m,atoms);d.classes=clone(p.classes,atoms);
     d.ids=clone(p.ids,atoms);d.solute=clone(p.solute,atoms);d.reverse=clone(p.reverse,2ull*p.reverse_capacity);
@@ -78,7 +82,7 @@ void initialize(const ParticleView &p) {
     d.distance=clone(p.distance,size_t(p.dist_height)*p.dist_capacity*p.connect*p.cells);
     d.hlocal=clone(p.hlocal,size_t(p.connect)*p.cells);
     d.water=clone(p.water,size_t(p.water_height)*p.water_capacity*p.cells);
-    checked(cudaMalloc(&cache.inverse,atoms*sizeof(double)));checked(cudaMalloc(&cache.translation,3*atoms*sizeof(double)));
+    checked(cudaMalloc(&cache.inverse,atoms*sizeof(IntegrationReal)));checked(cudaMalloc(&cache.translation,3*atoms*sizeof(WorkingReal)));
     cache.valid=true;
 }
 __global__ void publish_domain(ParticleView d,ParticleView host,int stage) {
@@ -112,7 +116,7 @@ void publish(int stage) {
     if(genesis_state_cycle_publish(cache.device,cache.host,stage))return;
     publish_domain<<<cache.device.cells,128>>>(cache.device,cache.host,stage);checked(cudaGetLastError());
 }
-__global__ void publish_boundary(ParticleView d,ParticleView host,double *inverse,double *translation,double *host_inverse,double *host_translation) {
+__global__ void publish_boundary(ParticleView d,ParticleView host,IntegrationReal *inverse,WorkingReal *translation,IntegrationReal *host_inverse,WorkingReal *host_translation) {
     const int cell=blockIdx.x;
     for(int slot=threadIdx.x;slot<d.na[cell];slot+=blockDim.x) {
         const int index=slot+d.width*cell;host_inverse[index]=inverse[index];
@@ -130,7 +134,7 @@ __device__ bool reverse(ParticleView p,int cell,int slot,int id,int *error) {
     p.reverse[2*(id-1)]=static_cast<std::int16_t>(cell+1);
     p.reverse[2*(id-1)+1]=static_cast<std::int16_t>(slot+1);return true;
 }
-__device__ void atom_from_record(ParticleView p,int cell,int slot,const double *real,const int *integer,int *error) {
+__device__ void atom_from_record(ParticleView p,int cell,int slot,const genesis::IntegrationReal *real,const int *integer,int *error) {
     const int index=slot+p.width*cell;
     for(int axis=0;axis<3;++axis){p.x[3*index+axis]=real[axis];p.v[3*index+axis]=real[axis+3];}
     p.q[index]=real[6];p.m[index]=real[7];p.classes[index]=integer[0];p.ids[index]=integer[1];p.solute[index]=integer[2];
@@ -169,7 +173,7 @@ __global__ void incoming_atoms(ParticleView p,AtomRecords r,int *error) {
     }
     p.noh[cell]=old+add-exits;
 }
-template<bool packed> __global__ void incoming_waters(ParticleView p,Records r,int sites,const double *charge,const double *mass,
+template<bool packed> __global__ void incoming_waters(ParticleView p,Records r,int sites,const WorkingReal *charge,const WorkingReal *mass,
     const int *classes,int *error,PackedView source_view) {
     const int cell=blockIdx.x;
     const int first_stay=packed?source_view.ranges[2*cell]:0,first_move=packed?source_view.ranges[2*(p.cells+cell)]:0;
@@ -185,7 +189,7 @@ template<bool packed> __global__ void incoming_waters(ParticleView p,Records r,i
         const bool stay=entry<stays;const int source=stay?entry:entry-stays;
         const int rr=stay?r.stay_real_rows:r.move_real_rows,rc=stay?r.stay_real_capacity:r.move_real_capacity;
         const int ir=stay?r.stay_int_rows:r.move_int_rows,ic=stay?r.stay_int_capacity:r.move_int_capacity;
-        const double *values=packed?source_view.real+18ull*((stay?first_stay:first_move)+source)+6*site:(stay?r.stay_real:r.move_real)+6*site+rr*(source+rc*cell);
+        const auto *values=packed?source_view.real+18ull*((stay?first_stay:first_move)+source)+6*site:(stay?r.stay_real:r.move_real)+6*site+rr*(source+rc*cell);
         const int *ids=packed?source_view.integer+3ull*((stay?first_stay:first_move)+source)+site:(stay?r.stay_int:r.move_int)+site+ir*(source+ic*cell);
         for(int axis=0;axis<3;++axis){p.x[3*index+axis]=values[axis];p.v[3*index+axis]=values[axis+3];}
         p.ids[index]=*ids;p.q[index]=charge[site];p.m[index]=mass[site];p.classes[index]=classes[site];
@@ -211,7 +215,7 @@ template<bool packed> __global__ void incoming_groups(ParticleView p,Records r,i
             const bool stay=entry<stays;const int source=stay?entry:entry-stays;
             const int rr=stay?r.stay_real_rows:r.move_real_rows,rc=stay?r.stay_real_capacity:r.move_real_capacity;
             const int ir=stay?r.stay_int_rows:r.move_int_rows,ic=stay?r.stay_int_capacity:r.move_int_capacity;
-            const double *values=packed?source_view.real+9ull*source_view.sites*((stay?first_stay:first_move)+source)+9*site:(stay?r.stay_real:r.move_real)+9*site+rr*(source+rc*(group+p.connect*cell));
+            const auto *values=packed?source_view.real+9ull*source_view.sites*((stay?first_stay:first_move)+source)+9*site:(stay?r.stay_real:r.move_real)+9*site+rr*(source+rc*(group+p.connect*cell));
             const int *ids=packed?source_view.integer+3ull*source_view.sites*((stay?first_stay:first_move)+source)+3*site:(stay?r.stay_int:r.move_int)+3*site+ir*(source+ic*(group+p.connect*cell));
             for(int axis=0;axis<3;++axis){p.x[3*index+axis]=values[axis];p.v[3*index+axis]=values[axis+3];}
             p.q[index]=values[6];p.m[index]=values[7];p.classes[index]=ids[0];p.ids[index]=ids[1];p.solute[index]=ids[2];
@@ -226,21 +230,29 @@ template<bool packed> __global__ void incoming_groups(ParticleView p,Records r,i
 }
 struct Geometry {double box[3],origin[3];int sites;double epsilon;};
 __device__ double periodic_translation(double x,double box,double origin) {
+#if defined(_SINGLE)
+    return genesis::single_translation(x,origin,box);
+#else
     const double shift=__dsub_rn(x,origin);
     const double move=__dsub_rn(__dmul_rn(box,0.5),__dmul_rn(box,round(__ddiv_rn(shift,box))));
     return __dsub_rn(move,origin);
+#endif
 }
-__device__ void translate(ParticleView p,int cell,int source,int destination,double *translation,Geometry g,int *error,bool solute) {
+__device__ void translate(ParticleView p,int cell,int source,int destination,WorkingReal *translation,Geometry g,int *error,bool solute) {
     for(int axis=0;axis<3;++axis)
         translation[3*(destination+p.width*cell)+axis]=periodic_translation(p.x[3*(source+p.width*cell)+axis],g.box[axis],g.origin[axis]);
     if(solute)reverse(p,cell,destination,p.solute[destination+p.width*cell],error);
 }
-__global__ void cell_bookkeeping(ParticleView p,double *inverse,double *translation,Geometry g,int *error) {
+__global__ void cell_bookkeeping(ParticleView p,IntegrationReal *inverse,WorkingReal *translation,Geometry g,int *error) {
     const int cell=blockIdx.x,count=p.na[cell],noh=p.noh[cell];
     if(count<0||count>p.width||noh<0||noh>count){if(!threadIdx.x)bad(error);return;}
     for(int slot=threadIdx.x;slot<count;slot+=blockDim.x) {
         const int index=slot+p.width*cell;
+#if defined(_SINGLE)
+        inverse[index]=p.m[index]>g.epsilon?__fdiv_rn(1.0f,p.m[index]):0.0f;
+#else
         inverse[index]=p.m[index]>g.epsilon?__ddiv_rn(1.0,p.m[index]):0.0;
+#endif
     }
     for(int slot=threadIdx.x;slot<noh;slot+=blockDim.x)translate(p,cell,slot,slot,translation,g,error,true);
     int offset=noh;
@@ -291,11 +303,11 @@ extern "C" void genesis_incoming_atoms(const ParticleView *view,const AtomRecord
     finish();
 }
 extern "C" void genesis_incoming_waters(const ParticleView *view,const Records *records,int sites,
-    const double *charge,const double *mass,const int *classes) {
+    const WorkingReal *charge,const WorkingReal *mass,const int *classes) {
     begin();PackedView packed;
     if(storage()) {
         require(cache.valid&&sites==3,"cached water requires resident TIP3 state");
-        const double *x=nullptr,*v=nullptr;int width=0,cells=0;
+        const IntegrationReal *x=nullptr,*v=nullptr;int width=0,cells=0;
         genesis_water_payload_view(&x,&v,&packed.real,&packed.integer,&packed.ranges,&width,&cells);
         require(packed.real&&packed.integer&&packed.ranges&&width==view->width&&cells==view->cells,"missing water payload");
         if(!cache.water_charge){cache.water_charge=clone(charge,sites);cache.water_mass=clone(mass,sites);cache.water_classes=clone(classes,sites);}
@@ -315,7 +327,7 @@ extern "C" void genesis_incoming_groups(const ParticleView *view,const Records *
     } else incoming_groups<false><<<view->cells,128>>>(*view,*records,error_device,packed);
     finish();
 }
-extern "C" void genesis_incoming_boundary(const ParticleView *view,double *inverse,double *translation,
+extern "C" void genesis_incoming_boundary(const ParticleView *view,IntegrationReal *inverse,WorkingReal *translation,
     const double *box,const double *origin,int sites,double epsilon) {
     require(sites>=1&&sites<=4,"unsupported water size");
     Geometry geometry;
@@ -333,9 +345,9 @@ extern "C" void genesis_incoming_boundary(const ParticleView *view,double *inver
 extern "C" int genesis_incoming_cached_view(const ParticleView *host,ParticleView *device) {
  if(!storage())return 0;initialize(*host);*device=cache.device;return 1;
 }
-extern "C" int genesis_incoming_pair_view(ParticleView *view,const double **translation) {
+extern "C" int genesis_incoming_pair_view(ParticleView *view,const WorkingReal **translation) {
  if(!storage() || !cache.valid)return 0;*view=cache.device;*translation=cache.translation;return 1;
 }
-extern "C" int genesis_incoming_metadata_view(ParticleView *view,const double **inverse) {
+extern "C" int genesis_incoming_metadata_view(ParticleView *view,const IntegrationReal **inverse) {
  if(!storage() || !cache.valid)return 0;*view=cache.device;*inverse=cache.inverse;return 1;
 }

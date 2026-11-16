@@ -3,9 +3,11 @@
 #include <cstdlib>
 #include <cstring>
 #include "bonded_incoming_view.h"
+#include "precision_types.h"
+using genesis::WorkingReal;
 #define CHECK(c) do{cudaError_t e=(c);if(e!=cudaSuccess){std::fprintf(stderr,"bonded incoming HBM: %s\n",cudaGetErrorString(e));std::abort();}}while(0)
 extern "C" int genesis_improper_packets(MoveView*);
-extern "C" void genesis_bonded_device_packets(const int**,const int**,const int**,const int**,const int**,const double**);
+extern "C" void genesis_bonded_device_packets(const int**,const int**,const int**,const int**,const int**,const WorkingReal**);
 namespace {
 struct Cache {bool ready=false;MoveView v{},host{};};Cache cache[5];
 __global__ void packet_metadata(MoveView v,const int *src,const int *dst,const int *slots,int kind,int *error){int c=blockIdx.x,b=c+(kind-1)*v.cells;
@@ -28,10 +30,14 @@ extern "C" int genesis_bonded_hbm_prepare(const MoveView *host,int kind,MoveView
  c.v.adds=static_cast<const int*>(clone(host->adds,4ull*host->cells));c.v.exits=static_cast<const int*>(clone(host->exits,4ull*host->cells));c.v.indices=static_cast<const int*>(clone(host->indices,4ull*host->index_capacity*host->cells));c.ready=true;}
  if(c.v.cells!=host->cells || c.v.fields!=host->fields)std::abort();MoveView v=c.v;
  if(kind<=3){const char *resident=std::getenv("GENESIS_BONDED_RESIDENCY");if(!resident || std::strcmp(resident,"1"))std::abort();
- const int *src,*dst,*slots,*ids,*iv;const double *rv;genesis_bonded_device_packets(&src,&dst,&slots,&ids,&iv,&rv);
+ const int *src,*dst,*slots,*ids,*iv;const WorkingReal *rv;genesis_bonded_device_packets(&src,&dst,&slots,&ids,&iv,&rv);
  static int *error=nullptr;if(!error)CHECK(cudaMalloc(&error,4));CHECK(cudaMemsetAsync(error,0,4,0));
  packet_metadata<<<v.cells,128>>>(v,src,dst,slots,kind,error);CHECK(cudaGetLastError());int bad=0;CHECK(cudaMemcpyAsync(&bad,error,4,cudaMemcpyDeviceToHost,0));CHECK(cudaStreamSynchronize(0));if(bad)std::abort();
- for(int f=0;f<v.fields;++f){auto &a=v.field[f];a.source=f==v.fields-1?static_cast<const void*>(ids):(a.bytes==8?static_cast<const void*>(rv):static_cast<const void*>(iv));a.source_rows=f==v.fields-1?1:(a.bytes==8?4:9);a.source_capacity=-1;}
+ // Float parameters and integer records both occupy four bytes; use the record schema.
+ const int first_real=kind==3?4:3;
+ for(int f=0;f<v.fields;++f){auto &a=v.field[f];const bool identity=f==v.fields-1,real=!identity&&f>=first_real;
+ a.source=identity?static_cast<const void*>(ids):(real?static_cast<const void*>(rv):static_cast<const void*>(iv));
+ a.source_rows=identity?1:(real?4:9);a.source_capacity=-1;}
  v.field[11].source=dst;v.field[11].source_offset=kind-1;
  }else if(kind==4 && genesis_improper_packets(&v)){
  }else{
@@ -39,7 +45,7 @@ extern "C" int genesis_bonded_hbm_prepare(const MoveView *host,int kind,MoveView
  for(int f=0;f<v.fields;++f){auto h=host->field[f];int shared=-1;
  for(int j=0;j<f;++j)if(host->field[j].source==h.source){shared=j;break;}
  if(shared>=0)c.v.field[f].source=c.v.field[shared].source;
- else {size_t bytes=size_t(h.source_rows)*h.source_capacity*v.cells*(h.bytes==8?8:4);
+ else {size_t bytes=size_t(h.source_rows)*h.source_capacity*v.cells*(h.bytes==1?4:h.bytes);
  if(!c.v.field[f].source || c.v.field[f].source==h.source)c.v.field[f].source=clone(h.source,bytes);
  else CHECK(cudaMemcpyAsync(const_cast<void*>(c.v.field[f].source),h.source,bytes,cudaMemcpyHostToDevice,0));}
  v.field[f].source=c.v.field[f].source;}

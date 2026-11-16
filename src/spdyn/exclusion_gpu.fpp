@@ -37,9 +37,9 @@ contains
  exclusion_gpu=.false.
 #ifdef USE_GPU
  if(first.or.reference.or.enabled_c()==0)return
- if(nproc_country/=1.or.d%num_cell_boundary/=0.or.storage_size(1.0_wp)/=64.or. &
+ if(nproc_country/=1.or.d%num_cell_boundary/=0.or. &
     e%forcefield/=ForcefieldCHARMM.or.d%nonbond_kernel/=NBK_GPU.or.domain_mask_mode()/=6) &
-    error stop 'GPU exclusion requires one-rank CHARMM double GPU masks mode6'
+    error stop 'GPU exclusion requires one-rank CHARMM GPU masks mode6'
  if(c%water_type==TIP4.or.sum(e%num_rb_dihedral)>0)error stop 'GPU exclusion requires TIP3 and no RB dihedrals'
  v%p(1)=c_loc(d%num_atom)
  v%p(2)=c_loc(d%num_water)
@@ -88,7 +88,7 @@ contains
  v%n(18)=e%excl_level
  v%n(19)=merge(1,0,constraint)
  v%n(20)=size(d%id_g2l,2)
- call build_c(v,EPS,d%max_num_atom,d%num_atom_domain)
+ call build_c(v,real(EPS,c_double),d%max_num_atom,d%num_atom_domain)
  exclusion_gpu=.true.
 #endif
  end function

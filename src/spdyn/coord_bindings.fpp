@@ -3,6 +3,7 @@
 #endif
 module coordinate_pack_mod
   use iso_c_binding,only:c_int,c_double,c_intptr_t
+  use constants_mod,only:wp,wip
   use cudafor
   use sp_domain_str_mod
   use translation_residency_mod,only:translation_configure,translation_refresh
@@ -36,9 +37,9 @@ module coordinate_pack_mod
     subroutine coordinate_require_host_c() bind(C,name='genesis_coord_require_host')
     end subroutine
     subroutine configure_c(values,translation,charge,counts,starts,width,cells,atoms) bind(C,name='genesis_coord_configure')
-      import c_double,c_int
-      real(c_double),device,intent(in)::values(*)
-      real(c_double),intent(in)::translation(*),charge(*)
+      import wip,c_int,wp
+      real(wip),device,intent(in)::values(*)
+      real(wp),intent(in)::translation(*),charge(*)
       integer(c_int),intent(in)::counts(*),starts(*)
       integer(c_int),value::width,cells,atoms
     end subroutine
@@ -48,8 +49,8 @@ module coordinate_pack_mod
       integer(c_int),value::short_step
     end subroutine
     integer(c_int) function coordinate_copy_c(values,atoms,components,stream,consumer) bind(C,name='genesis_coord_copy')
-      import c_double,c_int,c_intptr_t
-      real(c_double),device::values(*)
+      import wp,c_int,c_intptr_t
+      real(wp),device::values(*)
       integer(c_int),value::atoms,components,consumer
       integer(c_intptr_t),value::stream
     end function
@@ -58,8 +59,9 @@ module coordinate_pack_mod
       integer(c_int),value::virial,cpu_calc
     end function
     subroutine check_c(values,translation,charge,counts,starts) bind(C,name='genesis_coord_check')
-      import c_double,c_int
-      real(c_double),intent(in)::values(*),translation(*),charge(*)
+      import wip,wp,c_int
+      real(wip),intent(in)::values(*)
+      real(wp),intent(in)::translation(*),charge(*)
       integer(c_int),intent(in)::counts(*),starts(*)
     end subroutine
   end interface
@@ -85,7 +87,7 @@ contains
   end function
   subroutine coordinate_configure(domain,values)
     type(s_domain),intent(in)::domain
-    real(8),device,intent(in)::values(:,:,:)
+    real(wip),device,intent(in)::values(:,:,:)
     if(.not.coordinate_enabled()) return
     if(nproc_country/=1.or.domain%num_cell_boundary/=0) error stop 'Resident coordinates require one rank without halos'
     call configure_c(values,domain%trans_vec(1,1,1),domain%charge(1,1),domain%num_atom,domain%start_atom, &

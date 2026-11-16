@@ -1,15 +1,16 @@
 module force_topology_bindings_mod
  use iso_c_binding
+ use constants_mod,only:wp
  use cudafor
  implicit none
  integer,save::host_live_bond=0,host_live_angle=0,host_live_dihed=0,host_live_improper=0,host_live_nb14=0,host_live_corr=0
  interface
   subroutine topology_fields(kind,cells,expected,capacity,offset,owner,local,counts,lists,pbc,period,r0,r1,r2,r3) &
       bind(C,name='genesis_force_topology_fields')
-   import c_int,c_double
+   import c_int,wp
    integer(c_int),value::kind,cells,expected,capacity
    integer(c_int),device::offset(*),owner(*),local(*),counts(*),lists(*),pbc(*),period(*)
-   real(c_double),device::r0(*),r1(*),r2(*),r3(*)
+   real(wp),device::r0(*),r1(*),r2(*),r3(*)
   end subroutine
   subroutine topology_exclusion(kind,cells,expected,capacity,offset,owner,local,counts,starts,lists,move,host_move,pitch) &
       bind(C,name='genesis_force_topology_exclusion')

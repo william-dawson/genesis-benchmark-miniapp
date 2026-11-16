@@ -20,14 +20,17 @@ module bonded_force_mod
   public :: bonded_enabled,bonded_cpu_reference,bonded_prepare,bonded_finish
   integer::cells=0,width=0,atoms=0
   integer,device::g_atoms,g_notation
-  real(8),device,allocatable::g_box(:)
-  real(8),device,allocatable::g_coord(:,:,:),g_force(:,:,:),g_pbc(:,:,:)
+  real(wp),device,allocatable::g_box(:)
+  real(wip),device,allocatable::g_coord(:,:,:)
+  real(dp),device,allocatable::g_force(:,:,:)
+  real(wp),device,allocatable::g_pbc(:,:,:)
   integer(int2),device,allocatable::g_id(:,:)
   integer,device,allocatable::g_class(:)
   real(8),allocatable,pinned::host_parts(:,:,:)
   real(8),allocatable::before_values(:,:)
   integer(kind=cuda_stream_kind)::producer_stream
-  real(8),allocatable,pinned::snapshot_coord(:,:,:),snapshot_pbc(:,:,:),snapshot_box(:)
+  real(wip),allocatable,pinned::snapshot_coord(:,:,:)
+  real(wp),allocatable,pinned::snapshot_pbc(:,:,:),snapshot_box(:)
   logical::first=.true.
   interface
     integer(c_int) function pair_class_copy(values,n,stream) bind(C,name='genesis_pair_prepare_class_copy')
@@ -581,7 +584,7 @@ contains
     snapshot_pbc=pbc(1:4*atoms,1:1,1:1)
     call checked(cudaMemcpyAsync(g_pbc,snapshot_pbc,size(g_pbc),cudaMemcpyHostToDevice,producer_stream))
     end if
-    call checked(cudaMemsetAsync(g_force,0.0d0,size(g_force),producer_stream))
+    call checked(cudaMemsetAsync(g_force,0.0_dp,size(g_force),producer_stream))
     call values_pack(before_values,vir,b,a,u,d,i,e,v)
     if(host_live_bond>0) call kernel_bond<<<(host_live_bond+127)/128,128,0,producer_stream>>>()
     call checked(cudaGetLastError())
@@ -616,6 +619,10 @@ contains
     type(s_domain),intent(in)::domain
     real(dp),intent(inout)::vir(:,:,:),b(:),a(:),u(:),d(:),i(:),e(:),v(:)
     real(8)::sum_values(10,nthread),current(10,nthread),reference(10,nthread),ratio,maximum,atol
+#if defined(_SINGLE) || defined(_MIXED)
+    real(8)::unit_roundoff
+    real(8)::local_scale(nthread),old_ratio
+#endif
     integer::term,cell,worker,field,mode
     integer(kind=cuda_stream_kind)::previous_stream
     previous_stream=cudaforGetDefaultStream()
@@ -655,10 +662,46 @@ contains
     if(bonded_verify()) then
       call values_pack(current,vir,b,a,u,d,i,e,v)
       reference=current-before_values;maximum=0
+#if defined(_SINGLE) || defined(_MIXED)
+      unit_roundoff=0.5d0*real(epsilon(1.0_wp),8)
+#endif
       do field=1,10
         atol=1.0d-8
         if(field>=8) atol=1.0d-7
+#if defined(_SINGLE) || defined(_MIXED)
+        ratio=maxval(abs(sum_values(field,:)-reference(field,:))/(1024*unit_roundoff*(1+abs(reference(field,:)))))
+        old_ratio=ratio
+        if(field>=8)then
+          if(field>8)cycle
+          local_scale=sqrt(sum(reference(8:10,:)**2,dim=1))
+          ratio=maxval(sqrt(sum((sum_values(8:10,:)-reference(8:10,:))**2,dim=1))/ &
+            (1024*unit_roundoff*(1+local_scale)))
+        end if
+        if(old_ratio>1)write(*,'(a,i2,2(1x,es24.16))') &
+          'GENESIS_BONDED_ROUNDING: partial component and vector ratios ',field,old_ratio,ratio
+        maximum=max(maximum,ratio)
+        if(field>=8)then
+          ratio=sqrt(sum((sum_values(8:10,:)-reference(8:10,:))**2)/real(3*nthread,8))/ &
+            (1024*unit_roundoff+128*unit_roundoff*sqrt(sum(reference(8:10,:)**2)/real(3*nthread,8)))
+        else
+          ratio=sqrt(sum((sum_values(field,:)-reference(field,:))**2)/real(nthread,8))/ &
+            (1024*unit_roundoff+128*unit_roundoff*sqrt(sum(reference(field,:)**2)/real(nthread,8)))
+        end if
+        if(ratio>1)write(*,'(a,i2,1x,es24.16)')'GENESIS_BONDED_ROUNDING: partial RMS ratio ',field,ratio
+        maximum=max(maximum,ratio)
+        if(field>=8)then
+          ratio=sqrt(sum((sum(sum_values(8:10,:),dim=2)-sum(reference(8:10,:),dim=2))**2))/ &
+            (1024*unit_roundoff*(1+sqrt(sum(sum(reference(8:10,:),dim=2)**2))))
+          maximum=max(maximum,ratio)
+          ratio=sqrt(sum((sum(sum_values(8:10,:),dim=2)-sum(reference(8:10,:),dim=2))**2)/3d0)/ &
+            (1024*unit_roundoff+128*unit_roundoff*sqrt(sum(sum(reference(8:10,:),dim=2)**2)/3d0))
+        else
+          ratio=abs(sum(sum_values(field,:))-sum(reference(field,:)))/ &
+            (1024*unit_roundoff*(1+abs(sum(reference(field,:)))))
+        end if
+#else
         ratio=maxval(abs(sum_values(field,:)-reference(field,:))/(atol+1.0d-10*abs(reference(field,:))))
+#endif
         maximum=max(maximum,ratio)
       end do
       if(maximum>1) then
@@ -679,6 +722,9 @@ contains
   end subroutine
 
   attributes(global) subroutine kernel_bond()
+#if defined(_SINGLE) || defined(_MIXED)
+    use libm,only:fmaf
+#endif
     ! local variables
     real(wp)                 :: d12(1:3), r12, r_dif, cc_frc
     real(wp)                 :: ebond_temp, work(3), viri(3)
@@ -715,7 +761,11 @@ contains
                + g_box(2)*real(k2,wp)
         d12(3) = g_coord(3,i1,icel1) - g_coord(3,i2,icel2) &
                + g_box(3)*real(k3,wp)
+#if defined(_SINGLE) || defined(_MIXED)
+        r12 = sqrt(fmaf(d12(3),d12(3),fmaf(d12(1),d12(1),d12(2)*d12(2))))
+#else
         r12   = sqrt(d12(1)*d12(1) + d12(2)*d12(2) + d12(3)*d12(3))
+#endif
         r_dif = r12 - d_bond_r0(slot)
         ebond_temp = ebond_temp + d_bond_fc(slot) * r_dif * r_dif
 
@@ -734,12 +784,12 @@ contains
   
         ! store force: F=-dE/dX
         !
-    atomic_tmp=atomicadd(g_force(1,i1,icel1), - work(1))
-    atomic_tmp=atomicadd(g_force(2,i1,icel1), - work(2))
-    atomic_tmp=atomicadd(g_force(3,i1,icel1), - work(3))
-    atomic_tmp=atomicadd(g_force(1,i2,icel2), + work(1))
-    atomic_tmp=atomicadd(g_force(2,i2,icel2), + work(2))
-    atomic_tmp=atomicadd(g_force(3,i2,icel2), + work(3))
+    atomic_tmp=atomicadd(g_force(1,i1,icel1),real(-work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,i1,icel1),real(-work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,i1,icel1),real(-work(3),dp))
+    atomic_tmp=atomicadd(g_force(1,i2,icel2),real(work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,i2,icel2),real(work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,i2,icel2),real(work(3),dp))
 
     out_bond(:,slot)=0
     out_bond(1,slot)=ebond_temp
@@ -764,6 +814,9 @@ contains
     if(lane==1) sum_bond(:,cell)=partial(:,1)
   end subroutine
   attributes(global) subroutine kernel_angle()
+#if defined(_SINGLE) || defined(_MIXED)
+    use libm,only:fmaf
+#endif
     ! local variables
     real(wp)                 :: d12(1:3), r12_2, inv_r12_2
     real(wp)                 :: d32(1:3), r32_2, inv_r32_2
@@ -826,34 +879,60 @@ contains
                + g_box(2)*real(k2,wp)
         d32(3) = g_coord(3,i3,icel3) - g_coord(3,i2,icel2) &
                + g_box(3)*real(k3,wp)
+#if defined(_SINGLE) || defined(_MIXED)
+        r12_2 = fmaf(d12(3),d12(3),fmaf(d12(1),d12(1),d12(2)*d12(2)))
+        r32_2 = fmaf(d32(3),d32(3),fmaf(d32(1),d32(1),d32(2)*d32(2)))
+#else
         r12_2    = d12(1)*d12(1) + d12(2)*d12(2) + d12(3)*d12(3)
         r32_2    = d32(1)*d32(1) + d32(2)*d32(2) + d32(3)*d32(3)
+#endif
         r12r32   = sqrt(r12_2*r32_2)
 
         inv_r12r32 = 1.0_wp / r12r32
         inv_r12_2  = 1.0_wp / r12_2
         inv_r32_2  = 1.0_wp / r32_2
 
+#if defined(_SINGLE) || defined(_MIXED)
+        cos_t = fmaf(d12(3),d32(3),fmaf(d12(1),d32(1),d12(2)*d32(2)))*inv_r12r32
+#else
         cos_t  = (d12(1)*d32(1) + d12(2)*d32(2) + d12(3)*d32(3)) * inv_r12r32
+#endif
         cos_t  = min(1.0_wp, cos_t) 
         cos_t  = max(-1.0_wp, cos_t) 
+#if defined(_SINGLE) || defined(_MIXED)
+        t123 = real(acos(real(cos_t,8)),wp)
+#else
         t123   = acos(cos_t)
+#endif
         t_dif  = t123 - d_angle_theta0(slot)
         eangle_temp = eangle_temp + d_angle_fc(slot) * t_dif * t_dif
     
         ! gradient: dE/dX
         !
+#if defined(_SINGLE) || defined(_MIXED)
+        sin_t = real(sin(real(t123,8)),wp)
+#else
         sin_t  = sin(t123)
+#endif
         sin_t  = max (EPS, sin_t)
         cc_frc = - (2.0_wp * d_angle_fc(slot) * t_dif) / sin_t
         cc_frc2 = cos_t * inv_r12_2
         cc_frc3 = cos_t * inv_r32_2
+#if defined(_SINGLE) || defined(_MIXED)
+        work(1)=cc_frc*fmaf(d32(1),inv_r12r32,-d12(1)*cc_frc2)
+        work(2)=cc_frc*fmaf(-d12(2),cc_frc2,d32(2)*inv_r12r32)
+        work(3)=cc_frc*fmaf(-d12(3),cc_frc2,d32(3)*inv_r12r32)
+        work(4)=cc_frc*fmaf(d12(1),inv_r12r32,-d32(1)*cc_frc3)
+        work(5)=cc_frc*fmaf(-d32(2),cc_frc3,d12(2)*inv_r12r32)
+        work(6)=cc_frc*fmaf(-d32(3),cc_frc3,d12(3)*inv_r12r32)
+#else
         work(1) = cc_frc * (d32(1) * inv_r12r32 - d12(1) * cc_frc2)
         work(2) = cc_frc * (d32(2) * inv_r12r32 - d12(2) * cc_frc2)
         work(3) = cc_frc * (d32(3) * inv_r12r32 - d12(3) * cc_frc2)
         work(4) = cc_frc * (d12(1) * inv_r12r32 - d32(1) * cc_frc3)
         work(5) = cc_frc * (d12(2) * inv_r12r32 - d32(2) * cc_frc3)
         work(6) = cc_frc * (d12(3) * inv_r12r32 - d32(3) * cc_frc3)
+#endif
 
         viri(1) = viri(1) + d12(1)*work(1) + d32(1)*work(4)
         viri(2) = viri(2) + d12(2)*work(2) + d32(2)*work(5)
@@ -877,7 +956,11 @@ contains
                  + g_box(2)*real(k2,wp)
           d13(3) = g_coord(3,i1,icel1) - g_coord(3,i3,icel3) &
                  + g_box(3)*real(k3,wp)
+#if defined(_SINGLE) || defined(_MIXED)
+          r13 = sqrt(fmaf(d13(1),d13(1),d13(2)*d13(2))+d13(3)*d13(3))
+#else
           r13    = sqrt(d13(1)*d13(1) + d13(2)*d13(2) + d13(3)*d13(3))
+#endif
           ub_dif = r13 - d_angle_r0_ub(slot)
           eurey_temp = eurey_temp + d_angle_fc_ub(slot) * ub_dif * ub_dif
 
@@ -902,15 +985,15 @@ contains
 
         ! store force
         !
-    atomic_tmp=atomicadd(g_force(1,i1,icel1),-work(1)-work(7))
-    atomic_tmp=atomicadd(g_force(2,i1,icel1),-work(2)-work(8))
-    atomic_tmp=atomicadd(g_force(3,i1,icel1),-work(3)-work(9))
-    atomic_tmp=atomicadd(g_force(1,i2,icel2),+work(1)+work(4))
-    atomic_tmp=atomicadd(g_force(2,i2,icel2),+work(2)+work(5))
-    atomic_tmp=atomicadd(g_force(3,i2,icel2),+work(3)+work(6))
-    atomic_tmp=atomicadd(g_force(1,i3,icel3),-work(4)+work(7))
-    atomic_tmp=atomicadd(g_force(2,i3,icel3),-work(5)+work(8))
-    atomic_tmp=atomicadd(g_force(3,i3,icel3),-work(6)+work(9))
+    atomic_tmp=atomicadd(g_force(1,i1,icel1),real(-work(1)-work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i1,icel1),real(-work(2)-work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i1,icel1),real(-work(3)-work(9),dp))
+    atomic_tmp=atomicadd(g_force(1,i2,icel2),real(work(1)+work(4),dp))
+    atomic_tmp=atomicadd(g_force(2,i2,icel2),real(work(2)+work(5),dp))
+    atomic_tmp=atomicadd(g_force(3,i2,icel2),real(work(3)+work(6),dp))
+    atomic_tmp=atomicadd(g_force(1,i3,icel3),real(-work(4)+work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i3,icel3),real(-work(5)+work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i3,icel3),real(-work(6)+work(9),dp))
 
     out_angle(:,slot)=0
     out_angle(2,slot)=eangle_temp
@@ -1027,18 +1110,18 @@ contains
         viri(2) = viri(2) + grad_coef*v(2)
         viri(3) = viri(3) + grad_coef*v(3)
 
-    atomic_tmp=atomicadd(g_force(1,i1,icel1), - work(1))
-    atomic_tmp=atomicadd(g_force(2,i1,icel1), - work(2))
-    atomic_tmp=atomicadd(g_force(3,i1,icel1), - work(3))
-    atomic_tmp=atomicadd(g_force(1,i2,icel2),                                  + work(1) - work(4))
-    atomic_tmp=atomicadd(g_force(2,i2,icel2),                                  + work(2) - work(5))
-    atomic_tmp=atomicadd(g_force(3,i2,icel2),                                  + work(3) - work(6))
-    atomic_tmp=atomicadd(g_force(1,i3,icel3),                                  + work(4) + work(7))
-    atomic_tmp=atomicadd(g_force(2,i3,icel3),                                  + work(5) + work(8))
-    atomic_tmp=atomicadd(g_force(3,i3,icel3),                                  + work(6) + work(9))
-    atomic_tmp=atomicadd(g_force(1,i4,icel4), - work(7))
-    atomic_tmp=atomicadd(g_force(2,i4,icel4), - work(8))
-    atomic_tmp=atomicadd(g_force(3,i4,icel4), - work(9))
+    atomic_tmp=atomicadd(g_force(1,i1,icel1),real(-work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,i1,icel1),real(-work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,i1,icel1),real(-work(3),dp))
+    atomic_tmp=atomicadd(g_force(1,i2,icel2),real(work(1)-work(4),dp))
+    atomic_tmp=atomicadd(g_force(2,i2,icel2),real(work(2)-work(5),dp))
+    atomic_tmp=atomicadd(g_force(3,i2,icel2),real(work(3)-work(6),dp))
+    atomic_tmp=atomicadd(g_force(1,i3,icel3),real(work(4)+work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i3,icel3),real(work(5)+work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i3,icel3),real(work(6)+work(9),dp))
+    atomic_tmp=atomicadd(g_force(1,i4,icel4),real(-work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i4,icel4),real(-work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i4,icel4),real(-work(9),dp))
 
     out_dihed(:,slot)=0
     out_dihed(4,slot)=edihe_temp
@@ -1145,18 +1228,18 @@ contains
         viri(2) = viri(2) + grad_coef*v(2)
         viri(3) = viri(3) + grad_coef*v(3)
 
-    atomic_tmp=atomicadd(g_force(1,i1,icel1), - work(1))
-    atomic_tmp=atomicadd(g_force(2,i1,icel1), - work(2))
-    atomic_tmp=atomicadd(g_force(3,i1,icel1), - work(3))
-    atomic_tmp=atomicadd(g_force(1,i2,icel2), + work(1) - work(4))
-    atomic_tmp=atomicadd(g_force(2,i2,icel2), + work(2) - work(5))
-    atomic_tmp=atomicadd(g_force(3,i2,icel2), + work(3) - work(6))
-    atomic_tmp=atomicadd(g_force(1,i3,icel3), + work(4) + work(7))
-    atomic_tmp=atomicadd(g_force(2,i3,icel3), + work(5) + work(8))
-    atomic_tmp=atomicadd(g_force(3,i3,icel3), + work(6) + work(9))
-    atomic_tmp=atomicadd(g_force(1,i4,icel4), - work(7))
-    atomic_tmp=atomicadd(g_force(2,i4,icel4), - work(8))
-    atomic_tmp=atomicadd(g_force(3,i4,icel4), - work(9))
+    atomic_tmp=atomicadd(g_force(1,i1,icel1),real(-work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,i1,icel1),real(-work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,i1,icel1),real(-work(3),dp))
+    atomic_tmp=atomicadd(g_force(1,i2,icel2),real(work(1)-work(4),dp))
+    atomic_tmp=atomicadd(g_force(2,i2,icel2),real(work(2)-work(5),dp))
+    atomic_tmp=atomicadd(g_force(3,i2,icel2),real(work(3)-work(6),dp))
+    atomic_tmp=atomicadd(g_force(1,i3,icel3),real(work(4)+work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i3,icel3),real(work(5)+work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i3,icel3),real(work(6)+work(9),dp))
+    atomic_tmp=atomicadd(g_force(1,i4,icel4),real(-work(7),dp))
+    atomic_tmp=atomicadd(g_force(2,i4,icel4),real(-work(8),dp))
+    atomic_tmp=atomicadd(g_force(3,i4,icel4),real(-work(9),dp))
 
     out_improper(:,slot)=0
     out_improper(5,slot)=eimp_temp
@@ -1253,12 +1336,12 @@ contains
         viri(2) = viri(2) + dij(2)*work(2)
         viri(3) = viri(3) + dij(3)*work(3)
 
-    atomic_tmp=atomicadd(g_force(1,ix,icel), - work(1))
-    atomic_tmp=atomicadd(g_force(2,ix,icel), - work(2))
-    atomic_tmp=atomicadd(g_force(3,ix,icel), - work(3))
-    atomic_tmp=atomicadd(g_force(1,iy,jcel), + work(1))
-    atomic_tmp=atomicadd(g_force(2,iy,jcel), + work(2))
-    atomic_tmp=atomicadd(g_force(3,iy,jcel), + work(3))
+    atomic_tmp=atomicadd(g_force(1,ix,icel),real(-work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,ix,icel),real(-work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,ix,icel),real(-work(3),dp))
+    atomic_tmp=atomicadd(g_force(1,iy,jcel),real(work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,iy,jcel),real(work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,iy,jcel),real(work(3),dp))
 
     out_nb14(:,slot)=0
     out_nb14(6,slot)=elec_temp
@@ -1343,12 +1426,12 @@ contains
         viri(2) = viri(2) + dij(2)*work(2)
         viri(3) = viri(3) + dij(3)*work(3)
 
-    atomic_tmp=atomicadd(g_force(1,ix,icel), - work(1))
-    atomic_tmp=atomicadd(g_force(2,ix,icel), - work(2))
-    atomic_tmp=atomicadd(g_force(3,ix,icel), - work(3))
-    atomic_tmp=atomicadd(g_force(1,iy,jcel), + work(1))
-    atomic_tmp=atomicadd(g_force(2,iy,jcel), + work(2))
-    atomic_tmp=atomicadd(g_force(3,iy,jcel), + work(3))
+    atomic_tmp=atomicadd(g_force(1,ix,icel),real(-work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,ix,icel),real(-work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,ix,icel),real(-work(3),dp))
+    atomic_tmp=atomicadd(g_force(1,iy,jcel),real(work(1),dp))
+    atomic_tmp=atomicadd(g_force(2,iy,jcel),real(work(2),dp))
+    atomic_tmp=atomicadd(g_force(3,iy,jcel),real(work(3),dp))
 
     out_corr(:,slot)=0
     out_corr(6,slot)=elec_temp

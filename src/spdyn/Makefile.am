@@ -96,7 +96,8 @@ if CUDAGPU
 PME_CUFFT_LIBS = -lcufft
 STEP_CUDA_LIBS = -cuda
 gpu_thermo.o: FCFLAGS += -cuda -gpu=cc100,keep,ptxinfo,nofma
-gpu_thermo.o: sp_constraints.o sp_domain_str.o sp_constraints_str.o
+gpu_thermo.o: sp_constraints.o sp_domain_str.o sp_constraints_str.o precision_rounding.o
+precision_rounding.o: sp_domain_str.o sp_constraints_str.o
 water_bindings.o: FCFLAGS += -cuda
 water_bindings.o: sp_domain_str.o sp_boundary_str.o
 gpu_step.o sp_migration.o: water_bindings.o
@@ -145,6 +146,8 @@ spdyn_SOURCES += \
 	observables_gpu.cu \
 	metadata_import_gpu.cu \
 	force_topology_gpu.cu \
+	precision_types.h \
+	migration_coordinates.h \
 	migration_views.h \
 	bonded_incoming_view.h \
 	long_force_gpu.cu \
@@ -178,6 +181,7 @@ spdyn_SOURCES += \
 	hgr_migration.cu \
 	water_bindings.fpp \
 	water_migration.cu \
+	precision_rounding.fpp \
 	gpu_thermo.fpp \
 	gpu_step.fpp \
 	gpu_sp_energy.cu \
@@ -271,6 +275,14 @@ gpu_step.o: maintenance_probe.o
 endif
 
 if CUDAGPU
+translation_gpu.o gpu_force_assembly.o water_migration.o hgr_migration.o: precision_types.h
+gpu_pme.o long_force_gpu.o: precision_types.h
+gpu_state_ops.o observables_gpu.o maintenance_state_gpu.o metadata_import_gpu.o: precision_types.h
+water_migration.o hgr_migration.o atom_outgoing_gpu.o incoming_gpu_ops.o: migration_coordinates.h
+force_topology_gpu.o bonded_migration_gpu.o bonded_residency_gpu.o bonded_incoming_hbm.o: precision_types.h
+gpu_sp_energy.o nonbond_mirror_gpu.o nonbond_virial_gpu.o: precision_types.h
+gpu_coord_pack.o remap_coordinate_gpu.o state_cycle_gpu.o: precision_types.h
+incoming_gpu_ops.o atom_outgoing_gpu.o migration_resident_gpu.o pair_prepare_gpu.o exclusion_gpu_ops.o: precision_types.h
 incoming_gpu_ops.o atom_outgoing_gpu.o migration_resident_gpu.o pair_prepare_gpu.o exclusion_gpu_ops.o improper_outgoing_gpu.o: migration_views.h
 bonded_incoming_gpu.o bonded_incoming_hbm.o bonded_incoming_cooperative.o improper_outgoing_gpu.o force_topology_gpu.o: bonded_incoming_view.h
 force_topology_bindings.o: FCFLAGS += -cuda

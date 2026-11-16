@@ -15,14 +15,14 @@ module maintenance_state_mod
       import c_int
     end function
     integer(c_int) function begin_c(values,width,cells,eligible) bind(C,name='genesis_maint_state_begin')
-      import c_int,c_double
-      real(c_double),device,intent(in)::values(*)
+      import c_int,wip
+      real(wip),device,intent(in)::values(*)
       integer(c_int),value::width,cells,eligible
     end function
     integer(c_int) function consume_c(values,first,second,width,cells,short,work,long) &
         bind(C,name='genesis_maint_state_consume')
-      import c_int,c_double
-      real(c_double),device,intent(inout)::values(*),first(*),second(*)
+      import c_int,wip
+      real(wip),device,intent(inout)::values(*),first(*),second(*)
       integer(c_int),value::width,cells,short,work,long
     end function
   end interface
@@ -30,7 +30,7 @@ contains
   logical function maintenance_state_begin(values,width,cells,eligible)
     integer,intent(in)::width,cells
     logical,intent(in)::eligible
-    real(8),device,intent(in)::values(:,:,:)
+    real(wip),device,intent(in)::values(:,:,:)
     maintenance_state_begin=begin_c(values,width,cells,merge(1,0,eligible))/=0
   end function
 
@@ -39,7 +39,7 @@ contains
     integer::cell
     integer,intent(in)::width,cells
     logical,intent(in)::short,work,long
-    real(8),device,intent(inout)::values(:,:,:),first(:,:,:),second(:,:,:)
+    real(wip),device,intent(inout)::values(:,:,:),first(:,:,:),second(:,:,:)
     maintenance_state_consume=consume_c(values,first,second,width,cells, &
       merge(1,0,short),merge(1,0,work),merge(1,0,long))/=0
     if(maintenance_state_consume.and.mode_c()==2) then

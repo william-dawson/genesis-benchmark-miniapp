@@ -8,9 +8,13 @@
 #include <cstring>
 #include <vector>
 #include <chrono>
+#include "precision_types.h"
+#include "migration_coordinates.h"
+using genesis::WorkingReal;
+using genesis::IntegrationReal;
 
-extern "C" void genesis_hgr_scatter(double *,double *,int *,int *,int *,int *,
-    const double *,const int *,const int *,int,int,int,int,int);
+extern "C" void genesis_hgr_scatter(IntegrationReal *,IntegrationReal *,int *,int *,int *,int *,
+    const IntegrationReal *,const int *,const int *,int,int,int,int,int);
 extern "C" int genesis_migration_resident();
 extern "C" int genesis_migration_host_packets();
 extern "C" int genesis_migration_prefix(int,int*,int*,int,int,int);
@@ -27,14 +31,14 @@ int flag(const char *name) {
     require(!std::strcmp(value,"0")||!std::strcmp(value,"1"),name);
     return value[0]=='1';
 }
-struct Attributes {double charge,mass;int cls,solute;};
+struct Attributes {WorkingReal charge;IntegrationReal mass;int cls,solute;};
 struct State {
-    const double *x=nullptr,*v=nullptr,*dist=nullptr;
+    const IntegrationReal *x=nullptr,*v=nullptr,*dist=nullptr;
     const int *groups=nullptr,*counts=nullptr;
     int width=0,cells=0,group_width=0,sites=0,connect=0,capacity=0,globals=0,total=0,atoms=0;
     int *keys[2]{},*values[2]{},*prefix=nullptr,*ids=nullptr,*ranges=nullptr,*error=nullptr,*integers=nullptr;
     std::int16_t *map=nullptr;
-    double *real=nullptr,*host_real=nullptr;
+    IntegrationReal *real=nullptr,*host_real=nullptr;
     int *host_integer=nullptr,*host_ranges=nullptr;
     Attributes *attributes=nullptr;
     void *temporary=nullptr;size_t temporary_bytes=0;
@@ -42,13 +46,17 @@ struct State {
     bool latched=false,timing=false;
 } state;
 __device__ int component(double r,double origin,double box,double cell,int count) {
+#if defined(_SINGLE)
+    return genesis::single_cell_coordinate(r,origin,box,cell,count);
+#else
     const double shifted=__dadd_rn(r,-origin);
     const double offset=__dadd_rn(__dmul_rn(box,0.5),-__dmul_rn(box,round(shifted/box)));
     int result=int(__dadd_rn(shifted,offset)/cell);
     if(result==count)--result;
     return result;
+#endif
 }
-__global__ void hgr_classify(const double *x,const int *groups,const int *counts,const int *prefix,
+__global__ void hgr_classify(const IntegrationReal *x,const int *groups,const int *counts,const int *prefix,
     const std::int16_t *map,int *keys,int *values,int *error,int width,int cells,int group_width,int sites,int connect,
     double3 box,double3 origin,double3 size,int3 grid) {
     const int slot=blockIdx.x*blockDim.x+threadIdx.x;
@@ -58,7 +66,7 @@ __global__ void hgr_classify(const double *x,const int *groups,const int *counts
     keys[output]=0;values[output]=slot;
     const int atom=groups[size_t(sites)*slot]-1;
     if(atom<0||atom>=width) {atomicExch(error,1);return;}
-    const double *r=x+3ull*(atom+width*cell);
+    const IntegrationReal *r=x+3ull*(atom+width*cell);
     const int cx=component(r[0],origin.x,box.x,size.x,grid.x);
     const int cy=component(r[1],origin.y,box.y,size.y,grid.y);
     const int cz=component(r[2],origin.z,box.z,size.z,grid.z);
@@ -67,8 +75,8 @@ __global__ void hgr_classify(const double *x,const int *groups,const int *counts
     if(destination<0||destination>=cells) {atomicExch(error,3);return;}
     keys[output]=kind+connect*(destination==cell?cell:cells+destination);
 }
-__global__ void hgr_pack(const double *x,const double *v,const double *dist,const int *groups,const int *ids,
-    const Attributes *attributes,const int *keys,const int *values,int *ranges,double *real,int *integer,int *error,
+__global__ void hgr_pack(const IntegrationReal *x,const IntegrationReal *v,const IntegrationReal *dist,const int *groups,const int *ids,
+    const Attributes *attributes,const int *keys,const int *values,int *ranges,IntegrationReal *real,int *integer,int *error,
     int width,int group_width,int sites,int connect,int total,int atoms) {
     const int item=blockIdx.x*blockDim.x+threadIdx.x;
     if(item>=total)return;
@@ -77,7 +85,7 @@ __global__ void hgr_pack(const double *x,const double *v,const double *dist,cons
     if(item==0||keys[item-1]!=key)ranges[2*key]=item;
     if(item==total-1||keys[item+1]!=key)ranges[2*key+1]=item+1;
     for(int list=0;list<sites;++list) {
-        double *r=real+9ull*(sites*item+list);
+        IntegrationReal *r=real+9ull*(sites*item+list);
         int *i=integer+3ull*(sites*item+list);
         for(int c=0;c<9;++c)r[c]=0;
         i[0]=i[1]=i[2]=0;
@@ -97,14 +105,11 @@ __global__ void hgr_pack(const double *x,const double *v,const double *dist,cons
 }
 extern "C" int genesis_hgr_enabled() {
     static int value=flag("GENESIS_HGR_GPU");
-#if defined(_SINGLE) || defined(_MIXED)
-    require(!value,"requires double precision");
-#endif
     return value;
 }
 extern "C" int genesis_hgr_verify() {static int value=flag("GENESIS_HGR_VERIFY");return value;}
-extern "C" void genesis_hgr_latch(const double *x,const double *v,const int *groups,const int *counts,
-    const double *dist,int width,int cells,int group_width,int sites,int connect) {
+extern "C" void genesis_hgr_latch(const IntegrationReal *x,const IntegrationReal *v,const int *groups,const int *counts,
+    const IntegrationReal *dist,int width,int cells,int group_width,int sites,int connect) {
     if(!genesis_hgr_enabled())return;
     auto &s=state;
     if(!s.ready)checked(cudaEventCreateWithFlags(&s.ready,cudaEventDisableTiming));
@@ -114,9 +119,9 @@ extern "C" void genesis_hgr_latch(const double *x,const double *v,const int *gro
     checked(cudaEventRecord(s.ready,0));s.latched=true;
 }
 extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const int *ids,const int *solute,
-    const int *cls,const double *charge,const double *mass,const std::int16_t *map,
+    const int *cls,const WorkingReal *charge,const IntegrationReal *mass,const std::int16_t *map,
     const double *box,const double *origin,const double *size,const int *grid,int atoms,
-    int *stay,int *move,double *stay_real,double *move_real,int *stay_integer,int *move_integer,
+    int *stay,int *move,IntegrationReal *stay_real,IntegrationReal *move_real,int *stay_integer,int *move_integer,
     int stay_capacity,int move_capacity) {
     auto &s=state;
     if(!genesis_hgr_enabled()||!s.latched)return 0;
@@ -142,9 +147,9 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
         checked(cudaMalloc(&s.map,size_t(globals)*sizeof(std::int16_t)));
         checked(cudaMalloc(&s.ranges,4ull*buckets*sizeof(int)));
         checked(cudaMalloc(&s.error,sizeof(int)));
-        checked(cudaMalloc(&s.real,9ull*s.sites*s.capacity*sizeof(double)));
+        checked(cudaMalloc(&s.real,9ull*s.sites*s.capacity*sizeof(IntegrationReal)));
         checked(cudaMalloc(&s.integers,3ull*s.sites*s.capacity*sizeof(int)));
-        checked(cudaMallocHost(&s.host_real,9ull*s.sites*s.capacity*sizeof(double)));
+        checked(cudaMallocHost(&s.host_real,9ull*s.sites*s.capacity*sizeof(IntegrationReal)));
         checked(cudaMallocHost(&s.host_integer,3ull*s.sites*s.capacity*sizeof(int)));
         checked(cudaMallocHost(&s.host_ranges,4ull*buckets*sizeof(int)));
         checked(cub::DeviceRadixSort::SortPairs(nullptr,s.temporary_bytes,s.keys[0],s.keys[1],s.values[0],s.values[1],s.capacity));
@@ -183,7 +188,7 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
     checked(cudaGetLastError());if(s.timing)checked(cudaEventRecord(s.finish,0));
     const auto copied=std::chrono::steady_clock::now();
     if(genesis_migration_host_packets()) {
-    checked(cudaMemcpy(s.host_real,s.real,9ull*s.sites*s.total*sizeof(double),cudaMemcpyDeviceToHost));
+    checked(cudaMemcpy(s.host_real,s.real,9ull*s.sites*s.total*sizeof(IntegrationReal),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_integer,s.integers,3ull*s.sites*s.total*sizeof(int),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ranges,s.ranges,4ull*buckets*sizeof(int),cudaMemcpyDeviceToHost));
     int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));require(!error,"invalid classification/atom");
@@ -204,7 +209,7 @@ extern "C" int genesis_hgr_outgoing(const int *counts,const int *groups,const in
     }
     return 1;
 }
-extern "C" void genesis_hgr_check(const int *stay,const int *move,const double *stay_real,const double *move_real,
+extern "C" void genesis_hgr_check(const int *stay,const int *move,const IntegrationReal *stay_real,const IntegrationReal *move_real,
     const int *stay_integer,const int *move_integer,int stay_capacity,int move_capacity) {
     const auto &s=state;const int buckets=s.cells*s.connect;int seen=0;
     for(int b=0;b<2*buckets;++b) {
@@ -214,7 +219,7 @@ extern "C" void genesis_hgr_check(const int *stay,const int *move,const double *
         for(int k=0;k<count;++k) {
             const size_t output=k+size_t(capacity)*source,input=first+k;
             require(!std::memcmp((b<buckets?stay_real:move_real)+9ull*s.sites*output,s.host_real+9ull*s.sites*input,
-                9ull*sites*sizeof(double)),"CPU/GPU real records differ");
+                9ull*sites*sizeof(IntegrationReal)),"CPU/GPU real records differ");
             require(!std::memcmp((b<buckets?stay_integer:move_integer)+3ull*s.sites*output,s.host_integer+3ull*s.sites*input,
                 3ull*sites*sizeof(int)),"CPU/GPU identities/order differ");
         }
@@ -224,6 +229,6 @@ extern "C" void genesis_hgr_check(const int *stay,const int *move,const double *
     std::printf("GENESIS_HGR_VERIFY: exact packing pass %d\n",seen);
 }
 
-extern "C" void genesis_hgr_payload_view(const double **real,const int **integer,const int **ranges,int *sites,int *cells,int *connect) {
+extern "C" void genesis_hgr_payload_view(const IntegrationReal **real,const int **integer,const int **ranges,int *sites,int *cells,int *connect) {
     *real=state.real;*integer=state.integers;*ranges=state.ranges;*sites=state.sites;*cells=state.cells;*connect=state.connect;
 }

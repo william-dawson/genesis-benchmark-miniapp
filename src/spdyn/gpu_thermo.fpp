@@ -2,6 +2,9 @@
 #include "../config.h"
 #endif
 module genesis_thermo_mod
+#ifdef _SINGLE
+  use precision_rounding_mod,only:precision_thermostat_bound,precision_scale_bound
+#endif
   use observables_mod,only:observables_stage
   use final_reductions_mod
   use cudafor
@@ -15,11 +18,17 @@ module genesis_thermo_mod
   public::thermo_enabled,thermo_verify,thermo_statistics,thermo_output
   public::thermo_scale_reference,thermo_scale_check
   public::thermo_report
-  real(8),device,allocatable::total_force(:,:,:),half_velocity(:,:,:),partial(:,:)
-  real(8),allocatable,pinned::host_partial(:,:),reference(:,:,:),actual(:,:,:)
+  real(wip),device,allocatable::total_force(:,:,:),half_velocity(:,:,:)
+  real(8),device,allocatable::partial(:,:)
+  real(8),allocatable,pinned::host_partial(:,:)
+  real(wip),allocatable,pinned::reference(:,:,:),actual(:,:,:)
+#ifdef _SINGLE
+  real(wip),allocatable::scale_input(:,:,:)
+  real(8),allocatable::scale_oracle(:,:,:),scale_bound(:,:,:)
+#endif
 contains
   logical function thermo_report(vref,mass,counts,step) result(skip)
-    real(8),device,intent(in)::vref(:,:,:),mass(:,:)
+    real(wip),device,intent(in)::vref(:,:,:),mass(:,:)
     integer,device,intent(in)::counts(:)
     integer,intent(in)::step
     skip=.false.
@@ -56,13 +65,16 @@ contains
   subroutine thermo_statistics(domain,constraints,v,x,fl,fs,m,im,na,ns,nw,wl,hl,li,half,values)
     type(s_domain),intent(in)::domain
     type(s_constraints),intent(in)::constraints
-    real(8),device,intent(in)::v(:,:,:),x(:,:,:),fl(:,:,:),fs(:,:,:),m(:,:),im(:,:)
+    real(wip),device,intent(in)::v(:,:,:),x(:,:,:),fl(:,:,:),fs(:,:,:),m(:,:),im(:,:)
     integer,device,intent(in)::na(:),ns(:),nw(:),wl(:,:,:),hl(:,:),li(:,:,:,:)
-    real(8),intent(in)::half
+    real(wip),intent(in)::half
     real(8),intent(out)::values(9)
     integer::width,count,cell,atom,n
     real(8)::expected(9),virial(3,3),kin(3),ekin,ratio
-    real(8),allocatable::host_x(:,:,:),host_force(:,:,:),host_half(:,:,:)
+#ifdef _SINGLE
+    real(8)::oracle(9),bound(9)
+#endif
+    real(wip),allocatable::host_x(:,:,:),host_force(:,:,:),host_half(:,:,:)
     width=size(v,2);count=size(v,3)
     if(.not.allocated(total_force)) then
       allocate(total_force(3,width,count),half_velocity(3,width,count))
@@ -111,7 +123,13 @@ contains
       expected(4:6)=kin;virial=0
       call compute_virial_group(constraints,count,domain%num_water,domain%water_list,domain%mass,host_x,host_force,virial)
       expected(7:9)=[virial(1,1),virial(2,2),virial(3,3)]
+#ifdef _SINGLE
+      call precision_thermostat_bound(domain,constraints,host_x,host_force,host_half,actual,oracle,bound)
+      if(.not.all(ieee_is_finite(bound)).or.any(bound<=0))error stop 'Invalid thermostat rounding bound'
+      ratio=max(maxval(abs(values-oracle)/bound),maxval(abs(expected-oracle)/bound))
+#else
       ratio=maxval(abs(values-expected)/(1.0d-8+1.0d-10*abs(expected)))
+#endif
       if(.not.all(ieee_is_finite(expected)).or.ratio>1) then
         print *, 'GENESIS_THERMO statistics actual/reference ',values,expected
         error stop 'GPU thermostat statistics differ from CPU'
@@ -135,20 +153,29 @@ contains
   subroutine thermo_scale_reference(domain,constraints,v,factor)
     type(s_domain),intent(in)::domain
     type(s_constraints),intent(in)::constraints
-    real(8),device,intent(in)::v(:,:,:)
-    real(8),intent(in)::factor(3)
+    real(wip),device,intent(in)::v(:,:,:)
+    real(wip),intent(in)::factor(3)
     if(.not.thermo_verify()) return
     if(.not.allocated(reference)) then
       allocate(reference,mold=domain%velocity)
       allocate(actual,mold=domain%velocity)
     end if
     reference=v
-    call update_vel_group_3d(constraints,size(v,3),domain%num_water,domain%water_list,factor,domain%mass,reference)
+#ifdef _SINGLE
+    if(.not.allocated(scale_input))then
+      allocate(scale_input,mold=domain%velocity)
+      allocate(scale_oracle(3,size(v,2),size(v,3)),scale_bound(3,size(v,2),size(v,3)))
+    end if
+    scale_input=reference
+    call precision_scale_bound(domain,constraints,scale_input,factor,scale_oracle,scale_bound)
+#endif
+    call update_vel_group_3d(constraints,size(v,3),domain%num_water,domain%water_list, &
+      real(factor,wip),domain%mass,reference)
   end subroutine
 
   subroutine thermo_scale_check(domain,v)
     type(s_domain),intent(in)::domain
-    real(8),device,intent(in)::v(:,:,:)
+    real(wip),device,intent(in)::v(:,:,:)
     integer::cell,n
     real(8)::ratio
     if(.not.thermo_verify()) return
@@ -156,8 +183,17 @@ contains
     do cell=1,size(v,3)
       n=domain%num_atom(cell)
       if(.not.all(ieee_is_finite(actual(:,1:n,cell)))) error stop 'Nonfinite GPU thermostat velocity'
+#ifdef _SINGLE
+      if(.not.all(ieee_is_finite(scale_bound(:,1:n,cell))).or.any(scale_bound(:,1:n,cell)<0)) &
+        error stop 'Invalid thermostat scaling bound'
+      ratio=max(ratio,maxval(abs(real(actual(:,1:n,cell),8)-scale_oracle(:,1:n,cell))/ &
+        max(scale_bound(:,1:n,cell),tiny(1d0))))
+      ratio=max(ratio,maxval(abs(real(reference(:,1:n,cell),8)-scale_oracle(:,1:n,cell))/ &
+        max(scale_bound(:,1:n,cell),tiny(1d0))))
+#else
       ratio=max(ratio,maxval(abs(actual(:,1:n,cell)-reference(:,1:n,cell))/ &
         (1.0d-10+1.0d-12*abs(reference(:,1:n,cell)))))
+#endif
     end do
     if(ratio>1) error stop 'GPU thermostat group scaling differs from CPU'
     write(*,'(a,es20.12)') 'GENESIS_THERMO_VERIFY: scaling pass ',ratio
@@ -166,11 +202,11 @@ contains
   attributes(global) subroutine force_half(width,count,na,im,fl,fs,half,force,velocity)
     integer,value::width,count
     integer,device,intent(in)::na(count)
-    real(8),device,intent(in)::im(width,count),fl(3,width,count),fs(3,width,count)
-    real(8),value::half
-    real(8),device,intent(out)::force(3,width,count),velocity(3,width,count)
+    real(wip),device,intent(in)::im(width,count),fl(3,width,count),fs(3,width,count)
+    real(wip),value::half
+    real(wip),device,intent(out)::force(3,width,count),velocity(3,width,count)
     integer::index,cell,atom,k
-    real(8)::factor
+    real(wip)::factor
     index=(blockIdx%x-1)*blockDim%x+threadIdx%x
     cell=(index-1)/width+1;atom=mod(index-1,width)+1
     if(cell>count) return
@@ -185,12 +221,13 @@ contains
   attributes(global) subroutine group_statistics(width,count,water_height,water_max,list_height,group_max,connect, &
       v,x,force,half,m,ns,nw,wl,hl,li,result)
     integer,value::width,count,water_height,water_max,list_height,group_max,connect
-    real(8),device,intent(in)::v(3,width,count),x(3,width,count),force(3,width,count),half(3,width,count),m(width,count)
+    real(wip),device,intent(in)::v(3,width,count),x(3,width,count),force(3,width,count),half(3,width,count),m(width,count)
     integer,device,intent(in)::ns(count),nw(count),wl(water_height,water_max,count),hl(connect,count)
     integer,device,intent(in)::li(list_height,group_max,connect,count)
     real(8),device,intent(out)::result(9,count)
     real(8),shared::sums(9,128)
-    real(8)::acc(9),momentum(3),half_momentum(3),center(3),total,mass,vc(3),vh(3)
+    real(8)::acc(9)
+    real(wip)::momentum(3),half_momentum(3),center(3),total,mass,vc(3),vh(3)
     integer::thread,cell,entry,group,n,ids(8),h,k,stride,atom
     thread=threadIdx%x;cell=blockIdx%x;acc=0
     do atom=thread,ns(cell),128

@@ -76,8 +76,8 @@ contains
     integer::capacity,incoming_capacity
     active=.false.;reference_needed=.false.
     if(mode_c()==0)return
-    if(nproc_country/=1.or.d%num_cell_boundary/=0.or.wp/=c_double.or.e%forcefield/=ForcefieldCHARMM) &
-      error stop 'GPU bonded incoming requires one-rank CHARMM double without halos'
+    if(nproc_country/=1.or.d%num_cell_boundary/=0.or.e%forcefield/=ForcefieldCHARMM) &
+      error stop 'GPU bonded incoming requires one-rank CHARMM without halos'
     active=.true.
     if(kind==5.and.e%num_rb_dihe_all==0)return
     if(kind==4.and.e%num_impr_all==0)return
@@ -94,9 +94,9 @@ contains
       call add(view,c_loc(e%bond_pbc),1,size(e%bond_pbc,1), &
         c_loc(e%buf_bond_integer),size(e%buf_bond_integer,1),size(e%buf_bond_integer,2),3,4)
       call add(view,c_loc(e%bond_dist_min),1,size(e%bond_dist_min,1), &
-        c_loc(e%buf_bond_real),size(e%buf_bond_real,1),size(e%buf_bond_real,2),0,8)
+        c_loc(e%buf_bond_real),size(e%buf_bond_real,1),size(e%buf_bond_real,2),0,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%bond_force_const),1,size(e%bond_force_const,1), &
-        c_loc(e%buf_bond_real),size(e%buf_bond_real,1),size(e%buf_bond_real,2),1,8)
+        c_loc(e%buf_bond_real),size(e%buf_bond_real,1),size(e%buf_bond_real,2),1,storage_size(1.0_wp)/8)
     case(2)
       view%counts=c_loc(e%num_angle);view%adds=c_loc(e%angle_add);view%exits=c_loc(e%angle_exit)
       view%indices=c_loc(e%angle_exit_index);view%index_capacity=size(e%angle_exit_index,1)
@@ -107,13 +107,13 @@ contains
       call add(view,c_loc(e%angle_pbc),size(e%angle_pbc,1),size(e%angle_pbc,2), &
         c_loc(e%buf_angle_integer),size(e%buf_angle_integer,1),size(e%buf_angle_integer,2),4,4)
       call add(view,c_loc(e%angle_theta_min),1,size(e%angle_theta_min,1), &
-        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),0,8)
+        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),0,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%angle_force_const),1,size(e%angle_force_const,1), &
-        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),1,8)
+        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),1,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%urey_rmin),1,size(e%urey_rmin,1), &
-        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),2,8)
+        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),2,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%urey_force_const),1,size(e%urey_force_const,1), &
-        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),3,8)
+        c_loc(e%buf_angle_real),size(e%buf_angle_real,1),size(e%buf_angle_real,2),3,storage_size(1.0_wp)/8)
     case(3)
       view%counts=c_loc(e%num_dihedral);view%adds=c_loc(e%dihed_add);view%exits=c_loc(e%dihed_exit)
       view%indices=c_loc(e%dihed_exit_index);view%index_capacity=size(e%dihed_exit_index,1)
@@ -126,9 +126,9 @@ contains
       call add(view,c_loc(e%dihe_pbc),size(e%dihe_pbc,1),size(e%dihe_pbc,2), &
         c_loc(e%buf_dihed_integer),size(e%buf_dihed_integer,1),size(e%buf_dihed_integer,2),6,4)
       call add(view,c_loc(e%dihe_phase),1,size(e%dihe_phase,1), &
-        c_loc(e%buf_dihed_real),size(e%buf_dihed_real,1),size(e%buf_dihed_real,2),0,8)
+        c_loc(e%buf_dihed_real),size(e%buf_dihed_real,1),size(e%buf_dihed_real,2),0,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%dihe_force_const),1,size(e%dihe_force_const,1), &
-        c_loc(e%buf_dihed_real),size(e%buf_dihed_real,1),size(e%buf_dihed_real,2),1,8)
+        c_loc(e%buf_dihed_real),size(e%buf_dihed_real,1),size(e%buf_dihed_real,2),1,storage_size(1.0_wp)/8)
     case(4)
       view%counts=c_loc(e%num_improper);view%adds=c_loc(e%impr_add);view%exits=c_loc(e%impr_exit)
       view%indices=c_loc(e%impr_exit_index);view%index_capacity=size(e%impr_exit_index,1)
@@ -139,9 +139,9 @@ contains
       call add(view,c_loc(e%impr_pbc),size(e%impr_pbc,1),size(e%impr_pbc,2), &
         c_loc(e%buf_impr_integer),size(e%buf_impr_integer,1),size(e%buf_impr_integer,2),5,4)
       call add(view,c_loc(e%impr_phase),1,size(e%impr_phase,1), &
-        c_loc(e%buf_impr_real),size(e%buf_impr_real,1),size(e%buf_impr_real,2),0,8)
+        c_loc(e%buf_impr_real),size(e%buf_impr_real,1),size(e%buf_impr_real,2),0,storage_size(1.0_wp)/8)
       call add(view,c_loc(e%impr_force_const),1,size(e%impr_force_const,1), &
-        c_loc(e%buf_impr_real),size(e%buf_impr_real,1),size(e%buf_impr_real,2),1,8)
+        c_loc(e%buf_impr_real),size(e%buf_impr_real,1),size(e%buf_impr_real,2),1,storage_size(1.0_wp)/8)
     case(5)
       view%counts=c_loc(e%num_rb_dihedral);view%adds=c_loc(e%rb_dihed_add);view%exits=c_loc(e%rb_dihed_exit)
       view%indices=c_loc(e%rb_dihed_exit_index);view%index_capacity=size(e%rb_dihed_exit_index,1)
@@ -150,7 +150,7 @@ contains
       call add(view,c_loc(e%rb_dihe_pbc),size(e%rb_dihe_pbc,1),size(e%rb_dihe_pbc,2), &
         c_loc(e%buf_rb_dihed_integer),size(e%buf_rb_dihed_integer,1),size(e%buf_rb_dihed_integer,2),4,4)
       call add(view,c_loc(e%rb_dihe_c),size(e%rb_dihe_c,1),size(e%rb_dihe_c,2), &
-        c_loc(e%buf_rb_dihed_real),size(e%buf_rb_dihed_real,1),size(e%buf_rb_dihed_real,2),0,8)
+        c_loc(e%buf_rb_dihed_real),size(e%buf_rb_dihed_real,1),size(e%buf_rb_dihed_real,2),0,storage_size(1.0_wp)/8)
     case default
       error stop 'Unknown bonded incoming kind'
     end select

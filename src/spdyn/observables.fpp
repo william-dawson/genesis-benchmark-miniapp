@@ -3,6 +3,7 @@
 #endif
 module observables_mod
  use iso_c_binding,only:c_int,c_double
+ use constants_mod,only:wip
  use cudafor
  use sp_domain_str_mod
  use,intrinsic::ieee_arithmetic,only:ieee_value,ieee_quiet_nan,ieee_is_nan
@@ -15,8 +16,8 @@ module observables_mod
    import c_int
   end function
   integer(c_int) function stage_c(f,v,m,n,width,cells,step) bind(C,name='genesis_observables_stage')
-   import c_int,c_double
-   real(c_double),device,intent(in)::f(*),v(*),m(*)
+   import c_int,wip
+   real(wip),device,intent(in)::f(*),v(*),m(*)
    integer(c_int),device,intent(in)::n(*)
    integer(c_int),value::width,cells,step
   end function
@@ -33,7 +34,7 @@ module observables_mod
  end interface
 contains
  logical function observables_stage(f,v,m,n,step) result(skip)
-  real(8),device,intent(in)::f(:,:,:),v(:,:,:),m(:,:)
+  real(wip),device,intent(in)::f(:,:,:),v(:,:,:),m(:,:)
   integer,device,intent(in)::n(:)
   integer,intent(in)::step
   skip=stage_c(f,v,m,n,size(f,2),size(f,3),step)==1

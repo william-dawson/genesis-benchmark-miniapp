@@ -15,12 +15,12 @@ module translation_residency_mod
       import c_int
     end function
     subroutine publish_c(values) bind(C,name='genesis_translation_publish')
-      import c_double
-      real(c_double),intent(in)::values(*)
+      import wp
+      real(wp),intent(in)::values(*)
     end subroutine
     subroutine refresh_c(values) bind(C,name='genesis_translation_refresh')
-      import c_double
-      real(c_double),intent(inout)::values(*)
+      import wp
+      real(wp),intent(inout)::values(*)
     end subroutine
   end interface
 contains

@@ -6,9 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+using genesis::WorkingReal;
 #define CHECK(c) do{cudaError_t e=(c);if(e!=cudaSuccess){std::fprintf(stderr,"GPU exclusion: %s\n",cudaGetErrorString(e));std::abort();}}while(0)
 extern "C" int genesis_bonded_hbm_exclusion(int,const int**,const int**,const signed char**,const int**);
-extern "C" int genesis_incoming_pair_view(ParticleView*,const double**);
+extern "C" int genesis_incoming_pair_view(ParticleView*,const WorkingReal**);
 namespace {
 struct View {void *p[27];int n[20];};
 int4 *mask_records=nullptr;int *mask_counts=nullptr,*inverse=nullptr;int record_cap=0,hash_cap=0;
@@ -28,7 +29,7 @@ __device__ Candidate load_global(View v,int c,int first,int last,int type,int sc
  auto map=ptr<int16_t>(v,3);q.c1=map[2*(first-1)]-1;q.c2=map[2*(last-1)]-1;q.a=map[2*(first-1)+1]-1;q.b=map[2*(last-1)+1]-1;q.type=type;q.scale=scale;
  if(q.c1<0 || q.c1>=v.n[0] || q.c2<0 || q.c2>=v.n[0] || q.a<0 || q.a>=ptr<int>(v,0)[q.c1] || q.b<0 || q.b>=ptr<int>(v,0)[q.c2]){atomicExch(bad,1);q.type=0;return q;}
  if(ptr<int16_t>(v,4)[q.c1+size_t(v.n[5])*q.c2]!=c+1){atomicExch(bad,2);q.type=0;return q;}
- if(type==2 && !(fabs(ptr<double>(v,6)[q.a+v.n[7]*q.c1])>eps && fabs(ptr<double>(v,6)[q.b+v.n[7]*q.c2])>eps))q.type=4;
+ if(type==2 && !(fabs(ptr<WorkingReal>(v,6)[q.a+v.n[7]*q.c1])>eps && fabs(ptr<WorkingReal>(v,6)[q.b+v.n[7]*q.c2])>eps))q.type=4;
  return q;
 }
 __global__ void construct(View v,double eps,int *bad,int4 *records,int *used,int rcap,int hcap){
@@ -116,11 +117,11 @@ extern "C" void genesis_exclusion_build(const View *view,double eps,int *maximum
  host=*view;
  if(!queue){CHECK(cudaStreamCreateWithFlags(&queue,cudaStreamNonBlocking));CHECK(cudaMalloc(&error,4));CHECK(cudaMalloc(&totals,8));}
  View fresh=*view;size_t cells=host.n[0],width=host.n[1];
- size_t bytes[27]={4*cells,4*cells,size_t(4)*host.n[3]*host.n[4]*cells,size_t(4)*host.n[19],size_t(2)*host.n[5]*host.n[5],size_t(4)*host.n[6]*host.n[6],size_t(8)*host.n[7]*cells,
+ size_t bytes[27]={4*cells,4*cells,size_t(4)*host.n[3]*host.n[4]*cells,size_t(4)*host.n[19],size_t(2)*host.n[5]*host.n[5],size_t(4)*host.n[6]*host.n[6],sizeof(WorkingReal)*host.n[7]*cells,
  4*cells,size_t(8)*host.n[8]*cells,size_t(host.n[8])*cells,4*cells,size_t(12)*host.n[9]*cells,size_t(host.n[9])*cells,
  4*cells,size_t(16)*host.n[10]*cells,size_t(host.n[10])*cells,size_t(4)*host.n[10]*cells,size_t(4)*host.n[11]*cells,size_t(4)*host.n[12]*host.n[13]*host.n[11]*cells,
  4*cells,4*cells,size_t(16)*host.n[14]*cells,size_t(16)*host.n[15]*cells,size_t(4)*host.n[15]*cells,4*cells,width*width*cells,width*width*host.n[2]};
- void *alias[27]{};ParticleView particle;const double *translation;
+ void *alias[27]{};ParticleView particle;const WorkingReal *translation;
  if(genesis_incoming_pair_view(&particle,&translation)){
  alias[0]=particle.na;alias[1]=particle.nw;alias[2]=particle.water;alias[3]=particle.reverse;alias[6]=particle.q;alias[17]=particle.hlocal;alias[18]=particle.groups;
  }

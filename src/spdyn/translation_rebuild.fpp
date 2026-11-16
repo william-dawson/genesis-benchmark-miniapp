@@ -3,8 +3,8 @@
 #endif
 module translation_rebuild_mod
   use incoming_gpu_mod,only:incoming_boundary_suspend
-  use iso_c_binding,only:c_int
-  use iso_fortran_env,only:int64
+  use iso_c_binding,only:c_int,c_ptr,c_loc,c_size_t
+  use iso_fortran_env,only:int8
   use translation_residency_mod,only:translation_mode
   use constants_mod
   use mpi_parallel_mod
@@ -16,8 +16,13 @@ module translation_rebuild_mod
   implicit none
   private
   public::translation_rebuild_begin,translation_rebuild_finish,translation_output_skip
-  real(wp),allocatable,save::observed(:,:,:)
+  real(wp),allocatable,target,save::observed(:,:,:)
   interface
+    integer(c_int) function compare_c(a,b,bytes) bind(C,name='memcmp')
+      import c_int,c_ptr,c_size_t
+      type(c_ptr),value::a,b
+      integer(c_size_t),value::bytes
+    end function
     integer(c_int) function mode_c() bind(C,name='genesis_translation_rebuild_mode')
       import c_int
     end function
@@ -67,7 +72,7 @@ contains
   end subroutine
 
   subroutine translation_rebuild_finish(domain,comm,boundary,constraints)
-    type(s_domain),intent(inout)::domain
+    type(s_domain),target,intent(inout)::domain
     type(s_comm),intent(inout)::comm
     type(s_boundary),intent(inout)::boundary
     type(s_constraints),intent(inout)::constraints
@@ -89,9 +94,14 @@ contains
       call incoming_boundary_suspend(.false.)
       do cell=1,domain%num_cell_local
         do atom=1,domain%num_atom(cell)
-          if(any(transfer(domain%trans_vec(:,atom,cell),[0_int64,0_int64,0_int64])/= &
-                 transfer(observed(:,atom,cell),[0_int64,0_int64,0_int64]))) &
+          if(compare_c(c_loc(domain%trans_vec(1,atom,cell)),c_loc(observed(1,atom,cell)), &
+                       int(3*storage_size(1.0_wp)/8,c_size_t))/=0) then
+            write(*,'(a,3i10,6es24.16)') 'GENESIS_TRANSLATION_REBUILD: CPU/observed ', &
+              cell,atom,domain%id_l2g(atom,cell),domain%trans_vec(:,atom,cell),observed(:,atom,cell)
+            write(*,'(a,*(1x,z2.2))') 'CPU bytes ',transfer(domain%trans_vec(:,atom,cell),[0_int8])
+            write(*,'(a,*(1x,z2.2))') 'Observed bytes ',transfer(observed(:,atom,cell),[0_int8])
             error stop 'Translation rebuild depends on retired mirror'
+          end if
         end do
       end do
       domain%trans_vec=observed

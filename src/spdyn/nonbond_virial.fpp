@@ -3,6 +3,7 @@
 #endif
 module nonbond_virial_mod
   use iso_c_binding,only:c_int,c_double
+  use constants_mod,only:wp
   use sp_domain_str_mod
   use force_assembly_mod,only:force_assembly_enabled
   use, intrinsic :: ieee_arithmetic,only:ieee_is_finite
@@ -24,8 +25,8 @@ module nonbond_virial_mod
       import c_int
     end function
     subroutine poison_c(coordinates,force) bind(C,name="genesis_nonbond_virial_poison")
-      import c_double
-      real(c_double),intent(inout)::coordinates(*),force(*)
+      import wp
+      real(wp),intent(inout)::coordinates(*),force(*)
     end subroutine
   end interface
 contains
@@ -59,7 +60,8 @@ contains
     end if
   end function
   subroutine nonbond_virial_end(virial,coordinates,force)
-    real(c_double),intent(inout)::virial(:,:,:),coordinates(:,:,:),force(:,:,:,:)
+    real(c_double),intent(inout)::virial(:,:,:)
+    real(wp),intent(inout)::coordinates(:,:,:),force(:,:,:,:)
     real(c_double)::actual(3,3),reference(3,3),ratio
     if(active_mode/=2)return
     actual=sum(candidate,dim=3);reference=sum(virial,dim=3)

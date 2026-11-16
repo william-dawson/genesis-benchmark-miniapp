@@ -6,22 +6,25 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include "precision_types.h"
+using genesis::WorkingReal;
+using genesis::IntegrationReal;
 
 extern "C" void genesis_translation_require_host();
 extern "C" void genesis_translation_invalidate();
-extern "C" void genesis_translation_configure(const double*,const double*,const int*,int,int);
-extern "C" void genesis_translation_configure_device(const double*,const double*,const int*,int,int);
+extern "C" void genesis_translation_configure(const WorkingReal*,const WorkingReal*,const int*,int,int);
+extern "C" void genesis_translation_configure_device(const WorkingReal*,const WorkingReal*,const int*,int,int);
 extern "C" int genesis_pack_resident_available();
-extern "C" int genesis_pack_resident_copy(const double*,double*,double*,int*,int*,const double*,const double*,const int*,const int*,int,int);
+extern "C" int genesis_pack_resident_copy(const IntegrationReal*,WorkingReal*,WorkingReal*,int*,int*,const WorkingReal*,const WorkingReal*,const int*,const int*,int,int);
 extern "C" int genesis_state_cycle_retired();
 extern "C" void genesis_state_cycle_host_refreshed();
 
 extern "C" int genesis_nonbond_virial_host_required();
 extern "C" int genesis_remap_mode();
-extern "C" void genesis_remap_poison(double*,double*,int);
+extern "C" void genesis_remap_poison(WorkingReal*,double*,int);
 extern "C" void genesis_remap_record(int);
-extern "C" void genesis_remap_publish(const double*,const double*,const double*,const double*,const double*,
-    const double*,const double*,const double*,const double*,const int*,const int*,int,int,int);
+extern "C" void genesis_remap_publish(const IntegrationReal*,const IntegrationReal*,const WorkingReal*,const WorkingReal*,const double*,
+    const IntegrationReal*,const IntegrationReal*,const WorkingReal*,const WorkingReal*,const int*,const int*,int,int,int);
 
 extern "C" int genesis_pair_prepare_coord_copy(void*,int,int,std::uintptr_t,int);
 extern "C" void genesis_pair_prepare_expire();
@@ -43,24 +46,25 @@ int setting(const char *name,int maximum=1) {
     return int(selected);
 }
 struct State {
-    const double *coordinates=nullptr;
-    double *translation=nullptr,*charge=nullptr,*packed=nullptr,*raw=nullptr;
+    const IntegrationReal *coordinates=nullptr;
+    WorkingReal *translation=nullptr,*charge=nullptr,*packed=nullptr;
+    double *raw=nullptr;
     int *counts=nullptr,*starts=nullptr;
     int width=0,cells=0,atoms=0;
     bool active=false,short_step=false,host_current=true,copied[3]{};
     cudaEvent_t ready=nullptr,consumed[3]{};
 } state;
 
-__global__ void pack_periodic(const double *coordinates,double *translation,const double *charge,
-    const int *counts,const int *starts,double *packed,double *raw,int width,int cells,int atoms,double3 scale) {
+__global__ void pack_periodic(const IntegrationReal *coordinates,WorkingReal *translation,const WorkingReal *charge,
+    const int *counts,const int *starts,WorkingReal *packed,double *raw,int width,int cells,int atoms,double3 scale) {
     const int index=blockIdx.x*blockDim.x+threadIdx.x;
     const int cell=index/width,atom=index%width;
     if(cell>=cells||atom>=counts[cell])return;
     const int global=starts[cell]+atom;
     const size_t base=3ull*index;
-    const double tx=__dmul_rn(translation[base],scale.x);
-    const double ty=__dmul_rn(translation[base+1],scale.y);
-    const double tz=__dmul_rn(translation[base+2],scale.z);
+    const WorkingReal tx=__dmul_rn(translation[base],scale.x);
+    const WorkingReal ty=__dmul_rn(translation[base+1],scale.y);
+    const WorkingReal tz=__dmul_rn(translation[base+2],scale.z);
     translation[base]=tx;translation[base+1]=ty;translation[base+2]=tz;
     packed[global]=__dadd_rn(coordinates[base],tx);
     packed[atoms+global]=__dadd_rn(coordinates[base+1],ty);
@@ -77,9 +81,6 @@ __global__ void pack_periodic(const double *coordinates,double *translation,cons
 
 extern "C" int genesis_coord_enabled() {
     static const int enabled=setting("GENESIS_COORD_GPU");
-#if defined(_SINGLE) || defined(_MIXED)
-    if(enabled)std::abort();
-#endif
     return enabled;
 }
 extern "C" int genesis_coord_active() {return state.active;}
@@ -105,16 +106,16 @@ extern "C" void genesis_coord_require_host() {
 }
 extern "C" void genesis_coord_invalidate() {genesis_translation_invalidate();state.active=false;}
 
-extern "C" void genesis_coord_configure(const double *coordinates,const double *translation,
-    const double *charge,const int *counts,const int *starts,int width,int cells,int atoms) {
+extern "C" void genesis_coord_configure(const IntegrationReal *coordinates,const WorkingReal *translation,
+    const WorkingReal *charge,const int *counts,const int *starts,int width,int cells,int atoms) {
     if(!genesis_coord_enabled())return;
     auto &s=state;
     if(width<=0||cells<=0||atoms<=0)std::abort();
     if(s.width==0) {
         s.width=width;s.cells=cells;s.atoms=atoms;
-        checked(cudaMalloc(&s.translation,3ull*width*cells*sizeof(double)));
-        checked(cudaMalloc(&s.charge,size_t(width)*cells*sizeof(double)));
-        checked(cudaMalloc(&s.packed,4ull*atoms*sizeof(double)));
+        checked(cudaMalloc(&s.translation,3ull*width*cells*sizeof(WorkingReal)));
+        checked(cudaMalloc(&s.charge,size_t(width)*cells*sizeof(WorkingReal)));
+        checked(cudaMalloc(&s.packed,4ull*atoms*sizeof(WorkingReal)));
         checked(cudaMalloc(&s.raw,4ull*atoms*sizeof(double)));
         checked(cudaMalloc(&s.counts,size_t(cells)*sizeof(int)));
         checked(cudaMalloc(&s.starts,size_t(cells)*sizeof(int)));
@@ -133,8 +134,8 @@ extern "C" void genesis_coord_configure(const double *coordinates,const double *
         genesis_translation_configure_device(s.translation,translation,counts,width,cells);return;
     }
     genesis_translation_configure(s.translation,translation,counts,width,cells);
-    checked(cudaMemcpy(s.translation,translation,3ull*width*cells*sizeof(double),cudaMemcpyHostToDevice));
-    checked(cudaMemcpy(s.charge,charge,size_t(width)*cells*sizeof(double),cudaMemcpyHostToDevice));
+    checked(cudaMemcpy(s.translation,translation,3ull*width*cells*sizeof(WorkingReal),cudaMemcpyHostToDevice));
+    checked(cudaMemcpy(s.charge,charge,size_t(width)*cells*sizeof(WorkingReal),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.counts,counts,size_t(cells)*sizeof(int),cudaMemcpyHostToDevice));
     checked(cudaMemcpy(s.starts,starts,size_t(cells)*sizeof(int),cudaMemcpyHostToDevice));
 }
@@ -160,7 +161,9 @@ extern "C" int genesis_coord_copy(void *destination,int atoms,int components,std
     if(consumer==2&&!genesis_coord_pme())return 0;
     auto target=reinterpret_cast<cudaStream_t>(stream);
     checked(cudaStreamWaitEvent(target,s.ready,0));
-    checked(cudaMemcpyAsync(destination,consumer==2?s.raw:s.packed,size_t(components)*atoms*sizeof(double),cudaMemcpyDeviceToDevice,target));
+    const void *source=consumer==2?static_cast<const void*>(s.raw):static_cast<const void*>(s.packed);
+    const size_t element_bytes=consumer==2?sizeof(double):sizeof(WorkingReal);
+    checked(cudaMemcpyAsync(destination,source,size_t(components)*atoms*element_bytes,cudaMemcpyDeviceToDevice,target));
     checked(cudaEventRecord(s.consumed[consumer],target));s.copied[consumer]=true;
     genesis_remap_record(consumer);
     return 1;
@@ -173,18 +176,18 @@ extern "C" int genesis_coord_cpu_required(int virial,int cpu_calc) {
     return required;
 }
 
-extern "C" void genesis_coord_check(const double *coordinates,const double *translation,const double *charge,
+extern "C" void genesis_coord_check(const IntegrationReal *coordinates,const WorkingReal *translation,const WorkingReal *charge,
     const int *counts,const int *starts) {
     const int mode=genesis_coord_verify();
     if(!mode||!state.active)return;
     auto &s=state;
     checked(cudaEventSynchronize(s.ready));
-    std::vector<double> packed(4ull*s.atoms),snapshot;
-    checked(cudaMemcpy(packed.data(),s.packed,packed.size()*sizeof(double),cudaMemcpyDeviceToHost));
+    std::vector<WorkingReal> packed(4ull*s.atoms);
+    std::vector<IntegrationReal> snapshot;
+    checked(cudaMemcpy(packed.data(),s.packed,packed.size()*sizeof(WorkingReal),cudaMemcpyDeviceToHost));
     if(mode==2) {
         snapshot.resize(3ull*s.width*s.cells);
-        checked(cudaMemcpy(snapshot.data(),s.coordinates,snapshot.size()*sizeof(double),cudaMemcpyDeviceToHost));
-        coordinates=snapshot.data();
+        checked(cudaMemcpy(snapshot.data(),s.coordinates,snapshot.size()*sizeof(IntegrationReal),cudaMemcpyDeviceToHost));
     }
     std::vector<double> raw;
     if(genesis_coord_pme()) {
@@ -196,13 +199,14 @@ extern "C" void genesis_coord_check(const double *coordinates,const double *tran
         const size_t local=size_t(cell)*s.width+atom;
         const size_t global=starts[cell]+atom;
         for(int axis=0;axis<4;++axis) {
-            const double expected=axis==3?charge[local]:coordinates[3*local+axis]+translation[3*local+axis];
+            const double coordinate=axis==3?0:(mode==2?snapshot[3*local+axis]:double(coordinates[3*local+axis]));
+            const WorkingReal expected=axis==3?charge[local]:WorkingReal(coordinate+translation[3*local+axis]);
             const double actual=packed[size_t(axis)*s.atoms+global];
             if(!std::isfinite(actual)||!std::isfinite(expected))std::abort();
             const double ratio=std::abs(actual-expected)/(axis==3?1e-15:1e-10+1e-12*std::abs(expected));
             maximum=std::fmax(maximum,ratio);
             if(!raw.empty()) {
-                const double expected_raw=axis==3?charge[local]:coordinates[3*local+axis];
+                const double expected_raw=axis==3?charge[local]:coordinate;
                 const double actual_raw=axis==3?raw[3ull*s.atoms+global]:raw[3ull*global+axis];
                 if(!std::isfinite(actual_raw)||actual_raw!=expected_raw)std::abort();
             }
@@ -212,8 +216,8 @@ extern "C" void genesis_coord_check(const double *coordinates,const double *tran
     std::printf("GENESIS_COORD_VERIFY: periodic coordinates pass %.12e\n",maximum);
 }
 
-extern "C" void genesis_coord_prepare_remap(const double *coordinates,const double *velocity,const double *gpu_velocity,
-    const double *translation,const double *charge,const int *counts,const int *starts) {
+extern "C" void genesis_coord_prepare_remap(const IntegrationReal *coordinates,const IntegrationReal *velocity,const IntegrationReal *gpu_velocity,
+    const WorkingReal *translation,const WorkingReal *charge,const int *counts,const int *starts) {
     auto &s=state;
     if(!genesis_remap_mode()||s.active||!s.coordinates||!genesis_coord_pme())std::abort();
     if(genesis_remap_mode()==2) {

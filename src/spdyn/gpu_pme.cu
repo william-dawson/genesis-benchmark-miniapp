@@ -1,7 +1,10 @@
 #include <cuda_runtime.h>
+#include "precision_types.h"
+using genesis::WorkingReal;
+using genesis::IntegrationReal;
 extern "C" int genesis_long_force_requested_();
 extern "C" int genesis_long_force_reference();
-extern "C" void genesis_long_force_publish(const double *,const int *,const int *,int,int,cudaStream_t);
+extern "C" void genesis_long_force_publish(const IntegrationReal *,const int *,const int *,int,int,cudaStream_t);
 #include <cstdint>
 extern "C" int genesis_coord_copy(void *,int,int,std::uintptr_t,int);
 #include <cufft.h>
@@ -11,15 +14,24 @@ extern "C" int genesis_coord_copy(void *,int,int,std::uintptr_t,int);
 #include <cstring>
 #include <chrono>
 
-extern "C" void genesis_pme_mesh_sum_(double *, const int *, const int *);
+extern "C" void genesis_pme_mesh_sum_(WorkingReal *, const int *, const int *);
 extern "C" void genesis_pme_host_pack_(const int *, const int *, const int *, const int *,
-    const int *, const double *, const double *, double *, const int *);
+    const int *, const IntegrationReal *, const WorkingReal *, double *, const int *);
 extern "C" void genesis_pme_host_scatter_(const int *, const int *, const int *, const int *,
-    const int *, const double *, double *, const int *);
+    const int *, const IntegrationReal *, IntegrationReal *, const int *);
 
 namespace {
 constexpr int threads = 256;
 constexpr double pi = 3.141592653589793238462643383279502884;
+#if defined(_SINGLE) || defined(_MIXED)
+using MeshComplex = cufftComplex;
+using Scale = float3;
+constexpr cufftType forward_type = CUFFT_R2C, backward_type = CUFFT_C2R;
+#else
+using MeshComplex = cufftDoubleComplex;
+using Scale = double3;
+constexpr cufftType forward_type = CUFFT_D2Z, backward_type = CUFFT_Z2D;
+#endif
 
 void check(cudaError_t status, const char *operation) {
   if (status != cudaSuccess) {
@@ -39,7 +51,10 @@ void check(cufftResult status, const char *operation) {
 struct Parameters {
   int nx, ny, nz, ld;
   int x_first, x_count, y_first, y_count, ranks, communicator;
-  double box[3], alpha, vol4, bs3, bs3d;
+  WorkingReal box[3], alpha, vol4, bs3, bs3d;
+#if defined(_SINGLE) || defined(_MIXED)
+  WorkingReal scale[3], gfact[3];
+#endif
 };
 struct State {
   Parameters p{};
@@ -47,7 +62,7 @@ struct State {
   bool packed = false;
   bool cached_scale = false;
   bool gather_lanes = false;
-  double3 scale{};
+  Scale scale{};
   const char *timing_file = nullptr;
   long calls = 0, timed_calls = 0;
   double host_time[8]{}, fortran_time = 0;
@@ -56,13 +71,13 @@ struct State {
   int host_threads = 0;
   cudaStream_t stream{};
   cufftHandle forward{}, backward{};
-  double *mesh = nullptr, *theta = nullptr, *b2 = nullptr, *partial = nullptr;
-  double *coord = nullptr, *charge = nullptr, *force = nullptr;
-  double *host_force = nullptr, *host_partial = nullptr;
+  WorkingReal *mesh = nullptr, *theta = nullptr, *b2 = nullptr, *charge = nullptr;
+  IntegrationReal *coord = nullptr, *force = nullptr, *host_force = nullptr;
+  double *partial = nullptr, *host_partial = nullptr;
   double *packed_input = nullptr, *host_input = nullptr;
   int *natom = nullptr;
   int *host_offsets = nullptr;
-  cufftDoubleComplex *spectrum = nullptr;
+  MeshComplex *spectrum = nullptr;
 } state;
 
 template<class T> void allocate(T *&pointer, size_t count) {
@@ -109,33 +124,46 @@ void destroy() {
 }
 
 __device__ void wave(int t, Parameters p, int &x, int &y, int &z,
-                     double &gx, double &gy, double &gz, double &g2) {
+                     WorkingReal &gx, WorkingReal &gy, WorkingReal &gz, WorkingReal &g2) {
   x = t % (p.nx/2+1);
   y = (t/(p.nx/2+1)) % p.ny;
   z = t/((p.nx/2+1)*p.ny);
+#if defined(_SINGLE) || defined(_MIXED)
+  gx = p.gfact[0]*x;
+  gy = p.gfact[1]*(y <= p.ny/2 ? y : y-p.ny);
+  gz = p.gfact[2]*(z <= p.nz/2 ? z : z-p.nz);
+#else
   gx = 2*pi*x/p.box[0];
   gy = 2*pi*(y <= p.ny/2 ? y : y-p.ny)/p.box[1];
   gz = 2*pi*(z <= p.nz/2 ? z : z-p.nz)/p.box[2];
+#endif
   g2 = gx*gx + gy*gy + gz*gz;
 }
 
-__global__ void prepare_coefficients(Parameters p, const double *b2, double *theta, int count) {
+__global__ void prepare_coefficients(Parameters p, const WorkingReal *b2, WorkingReal *theta, int count) {
   int t = blockIdx.x*blockDim.x + threadIdx.x;
   if (t >= count) return;
   int x,y,z;
-  double gx,gy,gz,g2;
+  WorkingReal gx,gy,gz,g2;
   wave(t,p,x,y,z,gx,gy,gz,g2);
-  double exponent = -g2/(4*p.alpha*p.alpha);
-  double value = 0;
+  WorkingReal exponent = -g2/(4*p.alpha*p.alpha);
+  WorkingReal value = 0;
+#if defined(_SINGLE) || defined(_MIXED)
+  const WorkingReal fact=WorkingReal(0.25)/(-p.alpha*p.alpha);
+  exponent=g2*fact;
+  const WorkingReal epsilon=1.e-5f;
+  if (g2 > epsilon && exponent >= -80.f) {
+#else
   if (g2 > 1.e-10 && exponent >= -80.) {
+#endif
     value = b2[x]*b2[p.ld+y]*b2[2*p.ld+z]*exp(exponent)/g2;
     if (fabs(value) < 1.e-15) value = 0;
   }
   theta[t] = value;
 }
 
-__device__ void spline(double u, double *w, double *d) {
-  double u2 = u*u, u3 = u2*u, v = 1-u;
+__device__ void spline(WorkingReal u, WorkingReal *w, WorkingReal *d) {
+  WorkingReal u2 = u*u, u3 = u2*u, v = 1-u;
   w[0] = u3;
   w[1] = -3*u3 + 3*u2 + 3*u + 1;
   w[2] = 3*u3 - 6*u2 + 4;
@@ -146,16 +174,19 @@ __device__ void spline(double u, double *w, double *d) {
   d[3] = -v*v;
 }
 
-template<bool CachedScale>
-__device__ void interpolation(const double *coord, int atom, Parameters p,
-                              int index[3][4], double w[3][4], double d[3][4], double3 scale) {
+template<bool CachedScale, class CoordReal>
+__device__ void interpolation(const CoordReal *coord, int atom, Parameters p,
+                              int index[3][4], WorkingReal w[3][4], WorkingReal d[3][4], Scale scale) {
   int grid[3] = {p.nx,p.ny,p.nz};
   for (int axis=0; axis<3; ++axis) {
-    double factor=CachedScale ? (axis==0 ? scale.x : axis==1 ? scale.y : scale.z) : double(grid[axis])/p.box[axis];
-    double vr = coord[3*atom+axis] * factor;
+    WorkingReal factor=CachedScale ? (axis==0 ? scale.x : axis==1 ? scale.y : scale.z) : WorkingReal(grid[axis])/p.box[axis];
+#if defined(_SINGLE) || defined(_MIXED)
+    factor=p.scale[axis];
+#endif
+    WorkingReal vr = coord[3*atom+axis] * factor;
     // Fortran ANINT rounds halfway cases away from zero.
     vr = vr + grid[axis]/2 - grid[axis]*round(vr/grid[axis]);
-    vr = fmin(vr, grid[axis]-0.000001);
+    vr = fmin(vr, WorkingReal(grid[axis])-WorkingReal(0.000001));
     int base = min(int(vr),grid[axis]-1);
     spline(vr-base,w[axis],d[axis]);
     for (int k=0; k<4; ++k) {
@@ -166,16 +197,16 @@ __device__ void interpolation(const double *coord, int atom, Parameters p,
   }
 }
 
-template<bool Packed, bool CachedScale>
-__global__ void spread(Parameters p, const int *natom, const double *coord,
-                       const double *charge, double *mesh, int stride, int capacity, double3 scale) {
+template<bool Packed, bool CachedScale, class CoordReal, class ChargeReal>
+__global__ void spread(Parameters p, const int *natom, const CoordReal *coord,
+                       const ChargeReal *charge, WorkingReal *mesh, int stride, int capacity, Scale scale) {
   int atom = blockIdx.x*blockDim.x + threadIdx.x;
   if (atom >= capacity) return;
   if (!Packed && atom%stride >= natom[atom/stride]) return;
   int index[3][4];
-  double w[3][4],d[3][4];
+  WorkingReal w[3][4],d[3][4];
   interpolation<CachedScale>(coord,atom,p,index,w,d,scale);
-  double q = charge[atom];
+  WorkingReal q = charge[atom];
   for (int z=0; z<4; ++z)
     for (int y=0; y<4; ++y)
       for (int x=0; x<4; ++x) {
@@ -184,17 +215,22 @@ __global__ void spread(Parameters p, const int *natom, const double *coord,
       }
 }
 
-__global__ void spectral(Parameters p, cufftDoubleComplex *spectrum,
-                         const double *theta, double *partial, int count) {
+__global__ void spectral(Parameters p, MeshComplex *spectrum,
+                         const WorkingReal *theta, double *partial, int count) {
   __shared__ double sums[4][threads];
   int t = blockIdx.x*blockDim.x + threadIdx.x;
   double e=0,vx=0,vy=0,vz=0;
   if (t < count) {
     int x,y,z;
-    double gx,gy,gz,g2;
+    WorkingReal gx,gy,gz,g2;
     wave(t,p,x,y,z,gx,gy,gz,g2);
     auto value = spectrum[t];
+#if defined(_SINGLE) || defined(_MIXED)
+    WorkingReal fact=WorkingReal(0.25)/(-p.alpha*p.alpha);
+    WorkingReal factor=g2 > 1.e-5f ? -WorkingReal(2)*(WorkingReal(1)-g2*fact)/g2 : 0;
+#else
     double factor = g2 > 1.e-10 ? -2*(1+g2/(4*p.alpha*p.alpha))/g2 : 0;
+#endif
     double weight = (x==0 || x==p.nx/2) ? p.vol4*0.5 : p.vol4;
     bool owned_x = (x>=p.x_first && x<p.x_first+p.x_count) || (x==p.nx/2 && p.x_first==0);
     bool owned_y = y>=p.y_first && y<p.y_first+p.y_count;
@@ -203,8 +239,12 @@ __global__ void spectral(Parameters p, cufftDoubleComplex *spectrum,
     vx=e*(1+factor*gx*gx); vy=e*(1+factor*gy*gy); vz=e*(1+factor*gz*gz);
     // CPU CMPLX(theta) omits KIND and narrows the force filter to float.
     // Preserve that operation; energy and virial still use double theta.
-    double force_theta = double(float(theta[t]));
+    WorkingReal force_theta = WorkingReal(float(theta[t]));
+#if defined(_SINGLE) || defined(_MIXED)
+    spectrum[t] = make_cuFloatComplex(value.x*force_theta,value.y*force_theta);
+#else
     spectrum[t] = make_cuDoubleComplex(value.x*force_theta,value.y*force_theta);
+#endif
   }
   sums[0][threadIdx.x]=e; sums[1][threadIdx.x]=vx;
   sums[2][threadIdx.x]=vy; sums[3][threadIdx.x]=vz;
@@ -218,54 +258,58 @@ __global__ void spectral(Parameters p, cufftDoubleComplex *spectrum,
     for (int k=0;k<4;++k) partial[4*blockIdx.x+k]=sums[k][0];
 }
 
-template<bool Packed, bool CachedScale>
-__global__ void gather(Parameters p, const int *natom, const double *coord,
-                       const double *charge, const double *mesh, double *force,
-                       int stride, int capacity, double3 scale) {
+template<bool Packed, bool CachedScale, class CoordReal, class ChargeReal>
+__global__ void gather(Parameters p, const int *natom, const CoordReal *coord,
+                       const ChargeReal *charge, const WorkingReal *mesh, IntegrationReal *force,
+                       int stride, int capacity, Scale scale) {
   int atom = blockIdx.x*blockDim.x + threadIdx.x;
   if (atom >= capacity) return;
   if (!Packed && atom%stride >= natom[atom/stride]) return;
   int index[3][4];
-  double w[3][4],d[3][4], f[3] = {0,0,0};
+  WorkingReal w[3][4],d[3][4], f[3] = {0,0,0};
   interpolation<CachedScale>(coord,atom,p,index,w,d,scale);
   for (int z=0;z<4;++z)
     for (int y=0;y<4;++y)
       for (int x=0;x<4;++x) {
-        double v=mesh[index[0][x]+p.nx*(index[1][y]+p.ny*index[2][z])];
+        WorkingReal v=mesh[index[0][x]+p.nx*(index[1][y]+p.ny*index[2][z])];
         f[0]+=d[0][x]*w[1][y]*w[2][z]*v;
         f[1]+=w[0][x]*d[1][y]*w[2][z]*v;
         f[2]+=w[0][x]*w[1][y]*d[2][z]*v;
       }
   int grid[3] = {p.nx,p.ny,p.nz};
   for (int k=0;k<3;++k) {
-    double factor=CachedScale ? (k==0 ? scale.x : k==1 ? scale.y : scale.z) : double(grid[k])/p.box[k];
-    force[3*atom+k] = -f[k]*charge[atom]*factor*p.vol4*p.bs3d;
+    WorkingReal factor=CachedScale ? (k==0 ? scale.x : k==1 ? scale.y : scale.z) : WorkingReal(grid[k])/p.box[k];
+#if defined(_SINGLE) || defined(_MIXED)
+    factor=p.scale[k];
+#endif
+    force[3*atom+k] = -f[k]*WorkingReal(charge[atom])*factor*p.vol4*p.bs3d;
   }
 }
 
-template<bool Packed> void launch_spread(State &s,const double *coord,const double *charge,int stride,int atoms) {
+template<bool Packed, class CoordReal, class ChargeReal> void launch_spread(State &s,const CoordReal *coord,const ChargeReal *charge,int stride,int atoms) {
   if (s.cached_scale)
     spread<Packed,true><<<(atoms+threads-1)/threads,threads,0,s.stream>>>(s.p,s.natom,coord,charge,s.mesh,stride,atoms,s.scale);
   else
     spread<Packed,false><<<(atoms+threads-1)/threads,threads,0,s.stream>>>(s.p,s.natom,coord,charge,s.mesh,stride,atoms,s.scale);
 }
 
-__global__ void gather_four(Parameters p, const double *coord, const double *charge,
-                            const double *mesh, double *force, int atoms, double3 scale) {
+template<class CoordReal, class ChargeReal>
+__global__ void gather_four(Parameters p, const CoordReal *coord, const ChargeReal *charge,
+                            const WorkingReal *mesh, IntegrationReal *force, int atoms, Scale scale) {
   int thread=blockIdx.x*blockDim.x+threadIdx.x;
   int atom=thread/4, lane=thread%4;
   if (atom>=atoms) return;
   int index[3][4];
-  double w[3][4],d[3][4];
+  WorkingReal w[3][4],d[3][4];
   interpolation<true>(coord,atom,p,index,w,d,scale);
   // Four lanes share one atom; adjacent lanes read adjacent mesh x points.
   int x=lane==0 ? index[0][0] : lane==1 ? index[0][1] : lane==2 ? index[0][2] : index[0][3];
-  double wx=lane==0 ? w[0][0] : lane==1 ? w[0][1] : lane==2 ? w[0][2] : w[0][3];
-  double dx=lane==0 ? d[0][0] : lane==1 ? d[0][1] : lane==2 ? d[0][2] : d[0][3];
-  double fx=0,fy=0,fz=0;
+  WorkingReal wx=lane==0 ? w[0][0] : lane==1 ? w[0][1] : lane==2 ? w[0][2] : w[0][3];
+  WorkingReal dx=lane==0 ? d[0][0] : lane==1 ? d[0][1] : lane==2 ? d[0][2] : d[0][3];
+  WorkingReal fx=0,fy=0,fz=0;
   for(int z=0;z<4;++z)
     for(int y=0;y<4;++y) {
-      double v=mesh[x+p.nx*(index[1][y]+p.ny*index[2][z])];
+      WorkingReal v=mesh[x+p.nx*(index[1][y]+p.ny*index[2][z])];
       fx+=dx*w[1][y]*w[2][z]*v;
       fy+=wx*d[1][y]*w[2][z]*v;
       fz+=wx*w[1][y]*d[2][z]*v;
@@ -277,13 +321,13 @@ __global__ void gather_four(Parameters p, const double *coord, const double *cha
     fz+=__shfl_down_sync(mask,fz,offset,4);
   }
   if(lane==0) {
-    force[3*atom]=-fx*charge[atom]*scale.x*p.vol4*p.bs3d;
-    force[3*atom+1]=-fy*charge[atom]*scale.y*p.vol4*p.bs3d;
-    force[3*atom+2]=-fz*charge[atom]*scale.z*p.vol4*p.bs3d;
+    force[3*atom]=-fx*WorkingReal(charge[atom])*scale.x*p.vol4*p.bs3d;
+    force[3*atom+1]=-fy*WorkingReal(charge[atom])*scale.y*p.vol4*p.bs3d;
+    force[3*atom+2]=-fz*WorkingReal(charge[atom])*scale.z*p.vol4*p.bs3d;
   }
 }
 
-template<bool Packed> void launch_gather(State &s,const double *coord,const double *charge,int stride,int atoms) {
+template<bool Packed, class CoordReal, class ChargeReal> void launch_gather(State &s,const CoordReal *coord,const ChargeReal *charge,int stride,int atoms) {
   if (s.gather_lanes)
     gather_four<<<(4*atoms+threads-1)/threads,threads,0,s.stream>>>(s.p,coord,charge,s.mesh,s.force,atoms,s.scale);
   else if (s.cached_scale)
@@ -320,10 +364,11 @@ extern "C" int genesis_pme_gpu_enabled_() {
   return enabled;
 }
 
-extern "C" void genesis_pme_gpu_prepare_(const int *grid, const int *ld, const double *b2,
-    const double *box, const double *alpha, const double *el_fact,
-    const double *bs3, const double *bs3d, const int *xy_rank, const int *xy_size,
-    const int *z_rank, const int *z_size, const int *ranks, const int *communicator) {
+extern "C" void genesis_pme_gpu_prepare_(const int *grid, const int *ld, const WorkingReal *b2,
+    const WorkingReal *box, const WorkingReal *alpha, const WorkingReal *el_fact,
+    const WorkingReal *bs3, const WorkingReal *bs3d, const int *xy_rank, const int *xy_size,
+    const int *z_rank, const int *z_size, const int *ranks, const int *communicator,
+    const WorkingReal *prepared_scale, const WorkingReal *box_inv, const WorkingReal *vol4) {
   auto &s=state;
   if (s.ready && (s.p.nx!=grid[0] || s.p.ny!=grid[1] || s.p.nz!=grid[2] || s.p.ld!=*ld)) destroy();
   if (!s.ready) {
@@ -362,27 +407,39 @@ extern "C" void genesis_pme_gpu_prepare_(const int *grid, const int *ld, const d
     allocate(s.mesh,real_count); allocate(s.spectrum,complex_count);
     allocate(s.theta,complex_count); allocate(s.b2,3*size_t(*ld));
     allocate(s.partial,4*size_t(s.blocks)); pinned(s.host_partial,4*size_t(s.blocks));
-    FFT(cufftPlan3d(&s.forward,grid[2],grid[1],grid[0],CUFFT_D2Z));
-    FFT(cufftPlan3d(&s.backward,grid[2],grid[1],grid[0],CUFFT_Z2D));
+    FFT(cufftPlan3d(&s.forward,grid[2],grid[1],grid[0],forward_type));
+    FFT(cufftPlan3d(&s.backward,grid[2],grid[1],grid[0],backward_type));
     FFT(cufftSetStream(s.forward,s.stream)); FFT(cufftSetStream(s.backward,s.stream));
-    CUDA(cudaMemcpyAsync(s.b2,b2,3*size_t(*ld)*sizeof(double),cudaMemcpyHostToDevice,s.stream));
+    CUDA(cudaMemcpyAsync(s.b2,b2,3*size_t(*ld)*sizeof(WorkingReal),cudaMemcpyHostToDevice,s.stream));
     s.ready=true;
-    std::fprintf(stderr,"GENESIS_GPU_PME: resident order-4 double mesh %d %d %d; reusable cuFFT plans\n",grid[0],grid[1],grid[2]);
+    std::fprintf(stderr,"GENESIS_GPU_PME: resident order-4 %zu-bit mesh %d %d %d; reusable cuFFT plans\n",8*sizeof(WorkingReal),grid[0],grid[1],grid[2]);
   }
   for(int k=0;k<3;++k) s.p.box[k]=box[k];
+#if defined(_SINGLE) || defined(_MIXED)
+  s.scale=make_float3(prepared_scale[0],prepared_scale[1],prepared_scale[2]);
+  for(int k=0;k<3;++k) {
+    s.p.scale[k]=prepared_scale[k];
+    s.p.gfact[k]=WorkingReal(2)*WorkingReal(pi)*box_inv[k];
+  }
+#else
   s.scale=make_double3(double(grid[0])/box[0],double(grid[1])/box[1],double(grid[2])/box[2]);
+#endif
   s.p.alpha=*alpha; s.p.bs3=*bs3; s.p.bs3d=*bs3d;
   s.p.x_count=(grid[0]/2)/(*xy_size); s.p.x_first=(*xy_rank)*s.p.x_count;
   s.p.y_count=grid[1]/(*z_size); s.p.y_first=(*z_rank)*s.p.y_count;
   s.p.ranks=*ranks; s.p.communicator=*communicator;
+#if defined(_SINGLE) || defined(_MIXED)
+  s.p.vol4=*vol4;
+#else
   s.p.vol4=4*pi*(*el_fact)/(box[0]*box[1]*box[2]);
+#endif
   int count=(grid[0]/2+1)*grid[1]*grid[2];
   prepare_coefficients<<<s.blocks,threads,0,s.stream>>>(s.p,s.b2,s.theta,count);
   CUDA(cudaGetLastError());
 }
 
 extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
-    const int *natom, const double *coord, const double *charge, double *force, double *result) {
+    const int *natom, const IntegrationReal *coord, const WorkingReal *charge, IntegrationReal *force, double *result) {
   auto &s=state;
   bool measure=s.timing_file && s.calls>=60;
   double times[8]{};
@@ -405,7 +462,6 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
   }
   int atoms=capacity;
   bool resident_input=false;
-  const double *device_coord=s.coord,*device_charge=s.charge;
   if (s.packed) {
     s.host_offsets[0]=0;
     for(int cell=0;cell<*ncell;++cell) s.host_offsets[cell+1]=s.host_offsets[cell]+natom[cell];
@@ -417,28 +473,34 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
     } else {
     int offset=0;
     for(int cell=0;cell<*ncell;++cell) {
+#if defined(_SINGLE) || defined(_MIXED)
+      for(int atom=0;atom<natom[cell];++atom) {
+        for(int k=0;k<3;++k) s.host_input[3*(offset+atom)+k]=coord[3*(cell*(*stride)+atom)+k];
+        s.host_input[3*atoms+offset+atom]=charge[cell*(*stride)+atom];
+      }
+#else
       std::memcpy(s.host_input+3*offset,coord+3*cell*(*stride),3*size_t(natom[cell])*sizeof(double));
       std::memcpy(s.host_input+3*atoms+offset,charge+cell*(*stride),size_t(natom[cell])*sizeof(double));
+#endif
       offset+=natom[cell];
     }
     }
     }
-    device_coord=s.packed_input; device_charge=s.packed_input+3*atoms;
   }
   if (measure) times[1]=wall_time();
   if (s.packed) {
     if(!resident_input) CUDA(cudaMemcpyAsync(s.packed_input,s.host_input,4*size_t(atoms)*sizeof(double),cudaMemcpyHostToDevice,s.stream));
   } else {
-    CUDA(cudaMemcpyAsync(s.coord,coord,3*size_t(capacity)*sizeof(double),cudaMemcpyHostToDevice,s.stream));
-    CUDA(cudaMemcpyAsync(s.charge,charge,size_t(capacity)*sizeof(double),cudaMemcpyHostToDevice,s.stream));
+    CUDA(cudaMemcpyAsync(s.coord,coord,3*size_t(capacity)*sizeof(IntegrationReal),cudaMemcpyHostToDevice,s.stream));
+    CUDA(cudaMemcpyAsync(s.charge,charge,size_t(capacity)*sizeof(WorkingReal),cudaMemcpyHostToDevice,s.stream));
     CUDA(cudaMemcpyAsync(s.natom,natom,size_t(*ncell)*sizeof(int),cudaMemcpyHostToDevice,s.stream));
   }
   if (measure) times[2]=wall_time();
-  CUDA(cudaMemsetAsync(s.mesh,0,size_t(s.p.nx)*s.p.ny*s.p.nz*sizeof(double),s.stream));
+  CUDA(cudaMemsetAsync(s.mesh,0,size_t(s.p.nx)*s.p.ny*s.p.nz*sizeof(WorkingReal),s.stream));
   if (s.packed)
-    launch_spread<true>(s,device_coord,device_charge,*stride,atoms);
+    launch_spread<true>(s,s.packed_input,s.packed_input+3*atoms,*stride,atoms);
   else
-    launch_spread<false>(s,device_coord,device_charge,*stride,atoms);
+    launch_spread<false>(s,s.coord,s.charge,*stride,atoms);
   CUDA(cudaGetLastError());
   if (s.p.ranks>1) {
     // Each rank spreads owned charges once; keep the reduced mesh on-device.
@@ -446,15 +508,23 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
     int mesh_count=s.p.nx*s.p.ny*s.p.nz;
     genesis_pme_mesh_sum_(s.mesh,&mesh_count,&s.p.communicator);
   }
+#if defined(_SINGLE) || defined(_MIXED)
+  FFT(cufftExecR2C(s.forward,s.mesh,s.spectrum));
+#else
   FFT(cufftExecD2Z(s.forward,s.mesh,s.spectrum));
+#endif
   int count=(s.p.nx/2+1)*s.p.ny*s.p.nz;
   spectral<<<s.blocks,threads,0,s.stream>>>(s.p,s.spectrum,s.theta,s.partial,count);
   CUDA(cudaGetLastError());
+#if defined(_SINGLE) || defined(_MIXED)
+  FFT(cufftExecC2R(s.backward,s.spectrum,s.mesh));
+#else
   FFT(cufftExecZ2D(s.backward,s.spectrum,s.mesh));
+#endif
   if (s.packed)
-    launch_gather<true>(s,device_coord,device_charge,*stride,atoms);
+    launch_gather<true>(s,s.packed_input,s.packed_input+3*atoms,*stride,atoms);
   else
-    launch_gather<false>(s,device_coord,device_charge,*stride,atoms);
+    launch_gather<false>(s,s.coord,s.charge,*stride,atoms);
   CUDA(cudaGetLastError());
   if (measure) times[3]=wall_time();
   const bool resident_force=genesis_long_force_requested_()!=0;
@@ -465,7 +535,7 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
     genesis_long_force_publish(s.force,natom,s.host_offsets,*stride,*ncell,s.stream);
   }
   const bool host_force=!resident_force||genesis_long_force_reference();
-  if(host_force) CUDA(cudaMemcpyAsync(s.host_force,s.force,3*size_t(atoms)*sizeof(double),cudaMemcpyDeviceToHost,s.stream));
+  if(host_force) CUDA(cudaMemcpyAsync(s.host_force,s.force,3*size_t(atoms)*sizeof(IntegrationReal),cudaMemcpyDeviceToHost,s.stream));
   CUDA(cudaMemcpyAsync(s.host_partial,s.partial,4*size_t(s.blocks)*sizeof(double),cudaMemcpyDeviceToHost,s.stream));
   if (measure) times[4]=wall_time();
   CUDA(cudaStreamSynchronize(s.stream));
@@ -476,7 +546,7 @@ extern "C" void genesis_pme_gpu_recip_(const int *ncell, const int *stride,
   } else {
   int offset=0;
   for(int cell=0;cell<*ncell;++cell) {
-    std::memcpy(force+3*cell*(*stride),s.host_force+3*(s.packed ? offset : cell*(*stride)),3*size_t(natom[cell])*sizeof(double));
+    std::memcpy(force+3*cell*(*stride),s.host_force+3*(s.packed ? offset : cell*(*stride)),3*size_t(natom[cell])*sizeof(IntegrationReal));
     offset+=natom[cell];
   }
   }

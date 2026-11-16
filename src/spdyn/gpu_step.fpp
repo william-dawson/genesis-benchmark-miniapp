@@ -2,6 +2,9 @@
 #include "../config.h"
 #endif
 module genesis_step_state_mod
+#if defined(_SINGLE) || defined(_MIXED)
+  use precision_rounding_mod,only:precision_state_ratio,precision_constraint_ratios
+#endif
   use observables_mod,only:observables_poison
   use state_cycle_mod,only:state_cycle_begin,state_cycle_consume,state_cycle_retired
   use metadata_import_mod,only:metadata_import
@@ -40,52 +43,59 @@ module genesis_step_state_mod
   public :: step_prepare_remap
   public :: step_enabled, step_verify, step_candidate2, step_run2, step_sync, step_forget
   public :: step_check_begin, step_check_reference, step_check_finish
+#if defined(_SINGLE) || defined(_MIXED)
+  public :: step_check_cpu_repeat
+#endif
   public :: step_candidate1,step_run1,step_check1_finish,step_coords,step_output_due,step_force2
   logical,save::thermo_pending=.false.
   logical,save::work_ready=.true.
   logical, save :: resident=.false.
   logical, save :: maps_current=.false.
   integer, save :: cells=0, ld=0, workers=0
-  real(8), device, allocatable :: dx(:,:,:),dv(:,:,:),dxref(:,:,:),dvref(:,:,:),dwork(:,:,:)
-  real(8), device, allocatable :: dfs(:,:,:),dfl(:,:,:),dmass(:,:),dimass(:,:),dcm(:,:)
+  real(wip), device, allocatable :: dx(:,:,:),dv(:,:,:),dxref(:,:,:),dvref(:,:,:),dwork(:,:,:)
+  real(wip), device, allocatable :: dfs(:,:,:),dfl(:,:,:),dmass(:,:),dimass(:,:)
+  real(8), device, allocatable :: dcm(:,:)
   integer, device, allocatable :: dnatom(:),dnwater(:),dwater(:,:,:),dhlocal(:,:),dhlist(:,:,:,:)
-  real(8), device, allocatable :: dhdist(:,:,:,:)
+  real(wip), device, allocatable :: dhdist(:,:,:,:)
   integer, device :: failed
   integer,device,allocatable :: dnsolute(:)
   real(8),device,allocatable :: dwater_vir(:,:,:,:),dsolute_vir(:,:,:,:),dvir(:,:,:)
   real(8),allocatable,pinned :: host_vir(:,:,:)
-  real(8),constant :: dscale(3)
+  real(wip),constant :: dscale(3)
   integer, constant :: dcells,diter,dconnect
   real(8), constant :: dtolerance,dwater_rOH,dwater_rHH,dwater_massO,dwater_massH
-  real(8), constant :: dcenter(8),dbmoment(3)
-  real(8), allocatable, pinned :: host_state(:,:,:,:),host_cm(:,:)
-  real(8), allocatable :: saved(:,:,:,:),expected(:,:,:,:)
-  real(8) :: saved_box(3),expected_box(3)
+  real(8), constant :: dcenter(8)
+  real(wip), constant :: dbmoment(3)
+  real(wip), allocatable, pinned :: host_state(:,:,:,:)
+  real(8), allocatable, pinned :: host_cm(:,:)
+  real(wip), allocatable :: saved(:,:,:,:),expected(:,:,:,:)
+  real(wip) :: saved_box(3),expected_box(3)
   type(s_boundary) :: saved_boundary,expected_boundary
-  real(8),allocatable :: saved_trans(:,:,:)
-  real(8) :: saved_system(3)
+  real(wp),allocatable :: saved_trans(:,:,:)
+  real(wp) :: saved_system(3)
   interface
     integer(c_int) function long_copy(values,reference,width,count) bind(C,name='genesis_long_force_copy')
-      import c_int,c_double
-      real(c_double),device::values(*)
-      real(c_double),intent(inout)::reference(*)
+      import c_int,wip
+      real(wip),device::values(*)
+      real(wip),intent(inout)::reference(*)
       integer(c_int),value::width,count
     end function
     subroutine poison_work_c(first,second,width,count) bind(C,name='genesis_poison_work')
-      import c_double,c_int
-      real(c_double),device::first(*),second(*)
+      import wip,c_int
+      real(wip),device::first(*),second(*)
       integer(c_int),value::width,count
     end subroutine
     subroutine remove_translation_c(velocity,counts,width,count,x,y,z) bind(C,name='genesis_stop_translation')
-      import c_double,c_int
-      real(c_double),device::velocity(*)
+      import c_double,c_int,wip
+      real(wip),device::velocity(*)
       integer(c_int),device,intent(in)::counts(*)
       integer(c_int),value::width,count
       real(c_double),value::x,y,z
     end subroutine
     integer(c_int) function assembly_copy(values,width,count) bind(C,name='genesis_force_copy')
       use iso_c_binding,only:c_int,c_double
-      real(c_double),device::values(*)
+      import wip
+      real(wip),device::values(*)
       integer(c_int),value::width,count
     end function
   end interface
@@ -124,7 +134,7 @@ contains
   subroutine step_thermo_scale(domain,constraints,factor)
     type(s_domain),intent(in)::domain
     type(s_constraints),intent(in)::constraints
-    real(8),intent(in)::factor(3)
+    real(wip),intent(in)::factor(3)
     call thermo_scale_reference(domain,constraints,dv,factor)
     dscale=factor
     call scale_groups<<<dim3(cells,(ld+63)/64,constraints%connect+2),64>>>(1)
@@ -135,7 +145,7 @@ contains
   subroutine step_thermo_stats(domain,constraints,half,values)
     type(s_domain),intent(inout)::domain
     type(s_constraints),intent(in)::constraints
-    real(8),intent(in)::half
+    real(wip),intent(in)::half
     real(8),intent(out)::values(9)
     integer::cell,n
     call thermo_statistics(domain,constraints,dv,dxref,dfl,dfs,dmass,dimass, &
@@ -180,7 +190,7 @@ contains
     integer,save::selected=-1
     integer::status,code,cell,atom
     real(8)::cm(4),ratio,maximum
-    real(8),allocatable::reference(:,:,:)
+    real(wip),allocatable::reference(:,:,:)
     logical::verify
     character(16)::value
     if(selected<0) then
@@ -227,7 +237,7 @@ contains
   end function
 
   logical function step_export_force_coord(values,stream)
-    real(8),device,intent(out)::values(:,:,:)
+    real(wip),device,intent(out)::values(:,:,:)
     integer(kind=cuda_stream_kind),intent(in)::stream
     step_export_force_coord=resident
     if(resident) then
@@ -283,9 +293,6 @@ contains
         .and.constraints%water_type==TIP3.and.constraints%rigid_bond &
         .and.constraints%connect<=7.and.domain%num_cell_boundary==0.and.nproc_country==1 &
         .and.ensemble%tpcontrol==TpcontrolBussi
-#if defined(_SINGLE) || defined(_MIXED)
-    step_candidate2=.false.
-#endif
   end function
 
   logical function step_candidate1(dynamics,istep,ensemble,domain,constraints)
@@ -436,7 +443,7 @@ contains
     type(s_constraints),intent(in)::constraints
     type(s_boundary),intent(inout)::boundary
     type(s_dynvars),intent(inout)::dynvars
-    real(8)::scale(3),velocity_scale(3),bmoment(3),gr,half_short,half_long
+    real(wip)::scale(3),velocity_scale(3),bmoment(3),gr,half_short,half_long
     integer::cell,atom,bad
     logical,optional,intent(in)::thermostat_ready
     logical::long_step,prepared,short_force,download_coords
@@ -447,7 +454,7 @@ contains
     boundary%box_size_y_ref=boundary%box_size_y
     boundary%box_size_z_ref=boundary%box_size_z
     long_step=mod(istep-1,dynamics%elec_long_period)==0
-    half_short=0.5d0*dt_short;half_long=0.5d0*dt_long
+    half_short=0.5_wip*dt_short;half_long=0.5_wip*dt_long
     bmoment=dynvars%barostat_momentum
     if(.not.prepared) then
     call save_reference<<<(ld*cells+255)/256,256>>>(ld,cells)
@@ -457,7 +464,7 @@ contains
       gr=(bmoment(1)+bmoment(2)+bmoment(3))/ensemble%degree
       velocity_scale=exp(-(bmoment+gr)*half_long);dscale=velocity_scale
       if(prepared) then
-        call step_thermo_scale(domain,constraints,velocity_scale)
+        call step_thermo_scale(domain,constraints,real(velocity_scale,wip))
       else
       call scale_groups<<<dim3(cells,(ld+63)/64,constraints%connect+2),64>>>(1)
       call checked(cudaGetLastError())
@@ -470,7 +477,7 @@ contains
     scale=exp(bmoment*half_short);dscale=scale
     call scale_groups<<<dim3(cells,(ld+63)/64,constraints%connect+2),64>>>(2)
     call checked(cudaGetLastError())
-    call position_drift<<<(ld*cells+255)/256,256>>>(ld,cells,real(dt_short,8))
+    call position_drift<<<(ld*cells+255)/256,256>>>(ld,cells,dt_short)
     call checked(cudaGetLastError())
     call scale_groups<<<dim3(cells,(ld+63)/64,constraints%connect+2),64>>>(3)
     call checked(cudaGetLastError())
@@ -509,13 +516,14 @@ contains
     end do
     !$omp end parallel do
     else
-      call translation_reference(domain,scale)
+      call translation_reference(domain,real(scale,wip))
     end if
     call maintenance_probe_end(36)
     domain%system_size=[boundary%box_size_x,boundary%box_size_y,boundary%box_size_z]
     short_force=mod(istep,dynamics%elec_long_period)/=0
     if(translation_mode()/=0.and..not.coordinate_enabled()) error stop 'GPU translations require GPU coordinate packing'
-    if(coordinate_enabled()) call coordinate_pack_c(scale(1),scale(2),scale(3),merge(1,0,short_force))
+    if(coordinate_enabled()) call coordinate_pack_c(real(scale(1),c_double),real(scale(2),c_double), &
+                                                   real(scale(3),c_double),merge(1,0,short_force))
     call translation_scaled(domain)
     download_coords=.true.
     if(coordinate_enabled().and.coordinate_resident().and.short_force) download_coords=.false.
@@ -548,10 +556,10 @@ contains
 
   attributes(global) subroutine position_kick(width,count,half_long,half_short,long_step)
     integer,value::width,count
-    real(8),value::half_long,half_short
+    real(wip),value::half_long,half_short
     logical,value::long_step
     integer::index,cell,atom,k
-    real(8)::factor
+    real(wip)::factor
     index=(blockIdx%x-1)*blockDim%x+threadIdx%x
     cell=(index-1)/width+1;atom=mod(index-1,width)+1
     if(cell>count) return
@@ -566,7 +574,7 @@ contains
 
   attributes(global) subroutine position_drift(width,count,dt)
     integer,value::width,count
-    real(8),value::dt
+    real(wip),value::dt
     integer::index,cell,atom
     index=(blockIdx%x-1)*blockDim%x+threadIdx%x
     cell=(index-1)/width+1;atom=mod(index-1,width)+1
@@ -578,7 +586,7 @@ contains
   attributes(global) subroutine scale_groups(mode)
     integer,value::mode
     integer::cell,entry,group,n,ids(8),h,k
-    real(8)::center(3),total,value(3)
+    real(wip)::center(3),total,value(3)
     cell=blockIdx%x;group=blockIdx%z-2
     entry=(blockIdx%y-1)*blockDim%x+threadIdx%x
     if(group==-1) then
@@ -608,11 +616,11 @@ contains
     center=center/total
     do h=1,n
       if(mode==1) then
-        dv(:,ids(h),cell)=dv(:,ids(h),cell)+(dscale-1.0d0)*center
+        dv(:,ids(h),cell)=dv(:,ids(h),cell)+(dscale-1.0_wip)*center
       else if(mode==2) then
-        dx(:,ids(h),cell)=dxref(:,ids(h),cell)+(dscale-1.0d0)*center
+        dx(:,ids(h),cell)=dxref(:,ids(h),cell)+(dscale-1.0_wip)*center
       else
-        dx(:,ids(h),cell)=dx(:,ids(h),cell)+(dscale-1.0d0)*center
+        dx(:,ids(h),cell)=dx(:,ids(h),cell)+(dscale-1.0_wip)*center
       end if
     end do
   end subroutine
@@ -710,7 +718,8 @@ contains
     type(s_constraints),intent(in)::constraints
     type(s_boundary),intent(inout)::boundary
     type(s_dynvars),intent(in)::dynvars
-    real(8)::cm(8),half_long,half_short,bmoment(3)
+    real(8)::cm(8)
+    real(wip)::half_long,half_short,bmoment(3)
     logical::long_step
     integer::cell,atom,thread,status,bad
     call step_force2(dynamics,istep,domain,constraints)
@@ -728,7 +737,7 @@ contains
       if(status/=MPI_SUCCESS) error stop 'GPU timestep COM reduction failed'
 #endif
     end if
-    half_long=0.5d0*dt_long;half_short=0.5d0*dt_short
+    half_long=0.5_wip*dt_long;half_short=0.5_wip*dt_short
     bmoment=dynvars%barostat_momentum
     dcenter=cm;dbmoment=bmoment
     failed=0
@@ -784,7 +793,8 @@ contains
   attributes(global) subroutine center_momentum(threads)
     integer,value::threads
     integer::thread,cell,atom,k,stride
-    real(8)::s1,s2,s3,s4,s5,s6,s7,s8,m
+    real(8)::s1,s2,s3,s4,s5,s6,s7,s8
+    real(wip)::m
     real(8),shared::partial(8,128)
     thread=threadIdx%x;cell=blockIdx%x
     s1=0;s2=0;s3=0;s4=0;s5=0;s6=0;s7=0;s8=0
@@ -811,18 +821,18 @@ contains
 
   attributes(global) subroutine kick_derivative(width,count,half_long,half_short,long_step)
     integer,value::width,count
-    real(8),value::half_long,half_short
+    real(wip),value::half_long,half_short
     logical,value::long_step
     integer::index,cell,atom,k
-    real(8)::factor
+    real(wip)::factor
     index=(blockIdx%x-1)*blockDim%x+threadIdx%x
     cell=(index-1)/width+1;atom=mod(index-1,width)+1
     if(cell>count) return
     if(atom>dnatom(cell)) return
     if(long_step) then
       do k=1,3
-        dv(k,atom,cell)=dv(k,atom,cell)-dcenter(k)/dcenter(4)
-        dfl(k,atom,cell)=dfl(k,atom,cell)-dcenter(k+4)/dcenter(8)
+        dv(k,atom,cell)=dv(k,atom,cell)-real(dcenter(k)/dcenter(4),wip)
+        dfl(k,atom,cell)=dfl(k,atom,cell)-real(dcenter(k+4)/dcenter(8),wip)
       end do
       factor=half_long*dimass(atom,cell)
       do k=1,3
@@ -840,7 +850,7 @@ contains
   attributes(global) subroutine finish_derivative(width,count)
     integer,value::width,count
     integer::index,cell,atom,k
-    real(8)::change
+    real(wip)::change
     index=(blockIdx%x-1)*blockDim%x+threadIdx%x
     cell=(index-1)/width+1;atom=mod(index-1,width)+1
     if(cell>count) return
@@ -853,7 +863,7 @@ contains
 
   subroutine state_copy(domain,array,restore)
     type(s_domain),intent(inout)::domain
-    real(8),intent(inout)::array(:,:,:,:)
+    real(wip),intent(inout)::array(:,:,:,:)
     logical,intent(in)::restore
     if(restore) then
       domain%velocity(:,1:ld,1:cells)=array(:,:,:,1)
@@ -897,17 +907,67 @@ contains
     boundary%box_size_x_ref=saved_box(1);boundary%box_size_y_ref=saved_box(2);boundary%box_size_z_ref=saved_box(3)
   end subroutine
 
-  subroutine step_check_finish(domain,constraints,boundary,position)
+#if defined(_SINGLE) || defined(_MIXED)
+  subroutine step_check_cpu_repeat(domain,boundary,dt_check,virial,reference)
+    type(s_domain),intent(inout)::domain
+    type(s_boundary),intent(inout)::boundary
+    real(wip),intent(in)::dt_check
+    real(8),optional,intent(in)::virial(3,3),reference(3,3)
+    real(wip),allocatable::cpu_repeat(:,:,:,:)
+    integer::cell,atom,worst(4)
+    real(8)::ratio,av,rv
+    logical::exact
+    if(.not.allocated(cpu_repeat))allocate(cpu_repeat,mold=saved)
+    call state_copy(domain,cpu_repeat,.false.)
+    exact=.true.
+    do cell=1,cells
+      do atom=1,domain%num_atom(cell)
+        if(.not.all(ieee_is_finite(cpu_repeat(:,atom,cell,:))))error stop 'Nonfinite CPU step repeat'
+        if(any(cpu_repeat(:,atom,cell,:)/=expected(:,atom,cell,:)))exact=.false.
+      end do
+    end do
+    call precision_state_ratio(domain,cpu_repeat,expected,real(dt_check,8),present(virial),ratio,worst,av,rv)
+    if(ratio>1)then
+      print *, 'CPU repeat state ratio and worst field component atom cell ',ratio,worst
+      print *, 'CPU repeat actual/reference ',av,rv
+      error stop 'CPU step repeat exceeds state budget'
+    end if
+    if(any([boundary%box_size_x_ref,boundary%box_size_y_ref,boundary%box_size_z_ref]/=expected_box)) &
+      error stop 'CPU step repeat reference box differs'
+    if(any([boundary%box_size_x,boundary%box_size_y,boundary%box_size_z]/= &
+      [expected_boundary%box_size_x,expected_boundary%box_size_y,expected_boundary%box_size_z])) &
+      error stop 'CPU step repeat box differs'
+    if(present(virial))then
+      if(.not.present(reference))error stop 'Missing CPU repeat virial reference'
+      if(.not.all(ieee_is_finite(virial)).or.any(virial/=reference))error stop 'CPU step repeat virial differs'
+      write(*,'(a,es24.16,1x,l1)')'GENESIS_STEP_CPU_REPEAT: position state box and virial pass ',ratio,exact
+    else
+      write(*,'(a,es24.16,1x,l1)')'GENESIS_STEP_CPU_REPEAT: velocity state and box pass ',ratio,exact
+    end if
+    call step_check_reference(domain,boundary)
+  end subroutine
+#endif
+
+  subroutine step_check_finish(domain,constraints,boundary,position,dt_check)
     type(s_domain),intent(inout)::domain
     type(s_constraints),intent(in)::constraints
     type(s_boundary),intent(in)::boundary
     logical,optional,intent(in)::position
+    real(wip),optional,intent(in)::dt_check
     real(8)::ratio,error,value,reference,atol,rtol,maxratio,residual,r(3),v(3),tolerance
     integer::cell,atom,field,k,group,entry,h,first,second,worst(4)
     real(8)::worst_actual,worst_reference
+#ifdef _SINGLE
+    real(8)::native_ratios(2),cpu_ratios(2),native_raw(2),cpu_raw(2)
+#endif
     call step_sync(domain)
     call state_copy(domain,saved,.false.)
     maxratio=0
+#ifdef _SINGLE
+    if(.not.present(dt_check))error stop 'Missing native verification timestep'
+    call precision_state_ratio(domain,saved,expected,real(dt_check,8),present(position), &
+      maxratio,worst,worst_actual,worst_reference)
+#else
     do field=1,6
       atol=1.0d-10;rtol=1.0d-12
       if(field==5) then
@@ -926,11 +986,13 @@ contains
         end do
       end do
     end do
+#endif
     if(maxratio>1) then
       print *, 'GENESIS_STEP_VERIFY failed normalized state error ',maxratio
       print *, 'Worst field,component,atom,cell ',worst
       print *, 'GPU/CPU state values ',worst_actual,worst_reference
       cell=worst(4);atom=worst(3)
+      print *, 'GPU/CPU state vectors ',saved(:,atom,cell,worst(1)),expected(:,atom,cell,worst(1))
       do group=1,constraints%connect
         do entry=1,constraints%HGr_local(group,cell)
           if(.not.any(constraints%HGr_bond_list(1:group+1,entry,group,cell)==atom)) cycle
@@ -981,7 +1043,17 @@ contains
       end do
     end do
     tolerance=real(constraints%shake_tolerance,8)
+#ifdef _SINGLE
+    call precision_constraint_ratios(domain,constraints,saved,native_ratios,native_raw)
+    call precision_constraint_ratios(domain,constraints,expected,cpu_ratios,cpu_raw)
+    write(*,'(a,2(1x,es24.16))') 'GENESIS_STEP_PRECISION: CPU/GPU velocity residual ratios ', &
+      cpu_ratios(2),native_ratios(2)
+    if(max(cpu_ratios(2),native_ratios(2))>1.and..not.step_diagnose()) &
+      error stop 'Native velocity constraint rounding bound exceeded'
+    residual=native_raw(2)
+#else
     if(residual>1.01d0*tolerance+1.0d-12) error stop 'GPU velocity constraint residual too large'
+#endif
     if(step_diagnose()) then
       write(*,'(a,2(es20.12,1x))') 'GENESIS_STEP_DIAGNOSTIC: velocity state ratio and residual ',maxratio,residual
     else
@@ -989,17 +1061,28 @@ contains
     end if
   end subroutine
 
-  subroutine step_check1_finish(domain,constraints,boundary,virial,reference)
+  subroutine step_check1_finish(domain,constraints,boundary,virial,reference,dt_check)
     type(s_domain),intent(inout)::domain
     type(s_constraints),intent(in)::constraints
     type(s_boundary),intent(in)::boundary
     real(8),intent(in)::virial(3,3),reference(3,3)
+    real(wip),intent(in)::dt_check
     real(8)::ratio,distance,target,residual,r(3)
+#ifdef _SINGLE
+    real(8)::native_ratios(2),cpu_ratios(2),native_raw(2),cpu_raw(2)
+#endif
     integer::cell,group,entry,h,first,second,atom,other
-    call step_check_finish(domain,constraints,boundary,.true.)
+    call step_check_finish(domain,constraints,boundary,.true.,dt_check)
     if(.not.all(ieee_is_finite(virial)).or..not.all(ieee_is_finite(reference))) &
       error stop 'Non-finite position constraint virial'
+#ifdef _SINGLE
+    ratio=sqrt(sum((virial-reference)**2))/ &
+      (0.5d0*real(epsilon(1.0_wip),8)*(1024+128*sqrt(sum(reference**2))))
+#elif defined(_MIXED)
+    ratio=sqrt(sum((virial-reference)**2))/(1d-7+1d-11*sqrt(sum(reference**2)))
+#else
     ratio=maxval(abs(virial-reference)/(1.0d-7+1.0d-10*abs(reference)))
+#endif
     if(ratio>1) then
       print *, 'GENESIS_STEP_VERIFY virial error ',ratio
       print *, 'CPU constraint virial ',reference
@@ -1035,7 +1118,16 @@ contains
         end do
       end do
     end do
+#ifdef _SINGLE
+    call precision_constraint_ratios(domain,constraints,saved,native_ratios,native_raw)
+    call precision_constraint_ratios(domain,constraints,expected,cpu_ratios,cpu_raw)
+    residual=max(native_ratios(1),cpu_ratios(1))
+    write(*,'(a,2(1x,es24.16))') 'GENESIS_STEP_PRECISION: CPU/GPU position residual ratios ', &
+      cpu_ratios(1),native_ratios(1)
+    if(residual>1.and..not.step_diagnose())error stop 'Native position constraint rounding bound exceeded'
+#else
     if(residual>1.01d0) error stop 'GPU position constraint residual too large'
+#endif
     if(step_diagnose()) then
       write(*,'(a,2(es20.12,1x))') 'GENESIS_STEP_DIAGNOSTIC: position residual and virial ratio ',residual,ratio
     else
@@ -1400,7 +1492,8 @@ contains
   end subroutine
   attributes(global) subroutine solute_shake(dt)
     real(8),value::dt
-    real(8)::bond_vector(3,7),shake_force(7)
+    real(8)::bond_vector(3,7)
+    real(wip)::shake_force(7)
     ! local variables
     real(dp )                    :: tolerance, imass1, imass2
     real(dp )                    :: x12, y12, z12

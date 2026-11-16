@@ -35,7 +35,8 @@ module incoming_gpu_mod
   integer,allocatable,save::old_classes(:,:),old_ids(:,:),old_sol(:,:),old_noh(:)
   integer(int2),allocatable,save::old_reverse(:,:)
   logical,save::boundary_suspended=.false.,boundary_pending=.false.
-  real(wip),allocatable,target,save::boundary_translation(:,:,:),boundary_inverse(:,:)
+  real(wp),allocatable,target,save::boundary_translation(:,:,:)
+  real(wip),allocatable,target,save::boundary_inverse(:,:)
   integer,allocatable,save::boundary_solute(:)
   integer(int2),allocatable,target,save::boundary_reverse(:,:)
   interface
@@ -100,7 +101,7 @@ contains
     type(particle_view)::view
     integer::width
     if(nproc_country/=1.or.d%num_cell_boundary/=0)error stop 'GPU incoming requires one rank without halos'
-    if(wp/=c_double.or.wip/=c_double.or.int2/=c_int16_t)error stop 'GPU incoming requires double and 16-bit reverse map'
+    if(int2/=c_int16_t)error stop 'GPU incoming requires a 16-bit reverse map'
     width=size(d%coord,2)
     if(size(d%coord,1)/=3.or.size(d%velocity,2)/=width.or.size(d%charge,1)/=width.or. &
        size(d%mass,1)/=width.or.size(d%atom_cls_no,1)/=width.or.size(d%id_l2g,1)/=width.or. &
@@ -183,6 +184,7 @@ contains
     type(s_domain),target,intent(inout)::d
     type(particle_view)::view
     type(atom_records)::data
+    real(c_double)::box(3),origin(3),cell_size(3)
     handled=.false.
 #ifdef USE_GPU
     if(outgoing_mode()==0)return
@@ -193,8 +195,10 @@ contains
     data%real_rows=size(d%buf_real,1);data%real_capacity=size(d%buf_real,2)
     data%int_rows=size(d%buf_integer,1);data%int_capacity=size(d%buf_integer,2)
     data%index_capacity=size(d%ptl_exit_index,1)
-    call outgoing_c(view,data,[b%box_size_x,b%box_size_y,b%box_size_z], &
-      [b%origin_x,b%origin_y,b%origin_z],[b%cell_size_x,b%cell_size_y,b%cell_size_z], &
+    box=[b%box_size_x,b%box_size_y,b%box_size_z]
+    origin=[b%origin_x,b%origin_y,b%origin_z]
+    cell_size=[b%cell_size_x,b%cell_size_y,b%cell_size_z]
+    call outgoing_c(view,data,box,origin,cell_size, &
       [b%num_cells_x,b%num_cells_y,b%num_cells_z],c_loc(d%cell_g2l),merge(1,0,outgoing_atom_verify()))
     handled=.true.
 #endif
@@ -249,9 +253,11 @@ contains
       n=d%num_atom(cell)
       if(boundary_solute(cell)/=d%num_solute(cell))error stop 'GPU bookkeeping solute count mismatch'
       if(n>0)then
-        if(compare_c(c_loc(boundary_translation(1,1,cell)),c_loc(d%trans_vec(1,1,cell)),int(24*n,c_size_t))/=0) &
+        if(compare_c(c_loc(boundary_translation(1,1,cell)),c_loc(d%trans_vec(1,1,cell)), &
+          int(3*n*(storage_size(1.0_wp)/8),c_size_t))/=0) &
           error stop 'GPU bookkeeping translations differ from CPU'
-        if(compare_c(c_loc(boundary_inverse(1,cell)),c_loc(d%inv_mass(1,cell)),int(8*n,c_size_t))/=0) &
+        if(compare_c(c_loc(boundary_inverse(1,cell)),c_loc(d%inv_mass(1,cell)), &
+          int(n*(storage_size(1.0_wip)/8),c_size_t))/=0) &
           error stop 'GPU bookkeeping inverse mass differs from CPU'
       end if
       do atom=1,d%num_solute(cell)

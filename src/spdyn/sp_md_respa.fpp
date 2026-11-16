@@ -782,9 +782,13 @@ contains
         call mtk_barostat_vv1(dynamics,istep,istart,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
         step_expected_virial=dynvars%virial_const
         call step_check_reference(domain,boundary)
+#if defined(_SINGLE) || defined(_MIXED)
+        call mtk_barostat_vv1(dynamics,istep,istart,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+        call step_check_cpu_repeat(domain,boundary,dt_short,dynvars%virial_const,step_expected_virial)
+#endif
       end if
       call step_run1(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
-      if(step_verify()) call step_check1_finish(domain,constraints,boundary,dynvars%virial_const,step_expected_virial)
+      if(step_verify()) call step_check1_finish(domain,constraints,boundary,dynvars%virial_const,step_expected_virial,dt_short)
       return
     end if
     if(step_enabled()) then
@@ -890,9 +894,13 @@ contains
         call step_check_begin(domain,constraints,boundary)
         call mtk_barostat_vv2(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
         call step_check_reference(domain,boundary)
+#if defined(_SINGLE) || defined(_MIXED)
+        call mtk_barostat_vv2(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
+        call step_check_cpu_repeat(domain,boundary,dt_short)
+#endif
       end if
       call step_run2(dynamics,istep,dt_long,dt_short,ensemble,domain,constraints,boundary,dynvars)
-      if(step_verify()) call step_check_finish(domain,constraints,boundary)
+      if(step_verify()) call step_check_finish(domain,constraints,boundary,dt_check=dt_short)
       return
     end if
 #endif

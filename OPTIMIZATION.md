@@ -1,6 +1,43 @@
 # Experimental RIKYU optimization snapshot
 
-Latest unprofiled timing for build351026 (one B200, one MPI rank x32 CPU
+The resident preset now supports native Single (WP32/WIP32), mixed
+(WP32/WIP64) and double (WP64/WIP64). The precision port preserves each
+field's storage/ABI role throughout PME, force assembly, integration,
+thermostat, maintenance and reporting. Bonded reduction scratch is double
+in both WP32 modes; work contributions remain WP32. Constraint scratch and
+selected reductions also retain double, as in the original CPU path.
+
+For ApoA1,92,224atoms,one B200/one MPI rank x32threads,6,000steps,
+seed734381, matched timing354043 gives:
+
+| Mode | Original dynamics | Optimized dynamics | Speedup |
+|---|---:|---:|---:|
+| Single |28.345s|9.731s|2.91x|
+| Mixed |29.960s|9.835s|3.05x|
+
+Each normal arm has three interleaved repeats. Four Single long arms and
+four mixed long arms pass their explicitly documented criteria. Frozen
+initial/evolved force/energy/virial checks, output/restart checks and the
+FP64 regression pass; all161FP64 device bodies remain unchanged.
+The numerical comparison is qualified: rare mixed net-force errors exceed
+the old blanket ceiling even when every producer passes and assembly closure
+is zero. Mixed normal SHAKE velocity differences follow the associated
+position correction divided by dt; tight SHAKE passes the direct criterion.
+Alternative producer/coupled checks are validation-only, explicitly selected,
+and do not change the old verifier defaults or claim the old failures passed.
+
+The [precision report and numerical policy](https://github.com/RIKEN-RCCS/block1-eeas/tree/main/report/genesis-precision)
+record source/binary hashes, all selected checks, retained failures and
+reproduction scripts. The measured v36 archive is SHA256
+`1c9fc197400b69406c22b199674d9e589f0f7f70eae0b50c8572313ca96e66d6`;
+all57 application changes match that archive byte-for-byte. This document
+is updated after the measurement. Configure separate builds with
+`--enable-single`, `--enable-mixed`, or the default double mode; use
+`benchmarks/run-rikyu-optimized.sh` to select the resident preset. Full
+resident timestep validation remains one-rank; native PME2/4-rank frozen
+checks are separate. This benchmark mini-app is not scientific GENESIS.
+
+Earlier FP64 unprofiled timing for build351026 (one B200, one MPI rank x32 CPU
 threads, double ApoA1,92,224atoms,6,000steps): four-run medians are13.553s
 total and11.645s dynamics; a separate four-run confirmation gives13.5325s
 and11.6295s. These application timers overlap and must not be summed.

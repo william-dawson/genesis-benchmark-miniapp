@@ -7,10 +7,11 @@
 #endif
 #include <assert.h>
 #include "gpu_common.h"
+#include "precision_types.h"
 extern "C" int genesis_coord_copy(void *,int,int,uintptr_t,int);
 extern "C" int genesis_nonbond_mirror_skip(void *,size_t,int,int);
 extern "C" void genesis_nonbond_mirror_consume();
-extern "C" int genesis_nonbond_virial_stage(const void*,const void*,size_t,int,void*,double*,double*);
+extern "C" int genesis_nonbond_virial_stage(const void*,const void*,size_t,int,void*,genesis::WorkingReal*,genesis::WorkingReal*);
 extern "C" void genesis_nonbond_virial_consume();
 
 #include "../config.h"
@@ -164,7 +165,7 @@ typedef unsigned char  uchar;
         X += __shfl_xor_sync(0xffffffff, X, 16, 32); \
     }
 
-extern "C" int genesis_pair_prepare_force_ready(const double*,int,int);
+extern "C" int genesis_pair_prepare_force_ready(const REAL*,int,int);
 
 static REAL    *dev_coord_pbc = NULL;
 static int     *dev_atmcls_pbc = NULL;
@@ -491,7 +492,7 @@ void gpu_memcpy_h2d_energy(
     CUDA_CALL( cudaMemsetAsync( dev_force,  0, size_force, stream[0] ) );
     CUDA_CALL( cudaMemsetAsync( dev_ene_virial, 0, size_ene_virial, stream[0] ) );
 
-    if(!genesis_pair_prepare_force_ready(reinterpret_cast<const double*>(dev_coord_pbc),atom_domain,update)) {
+    if(!genesis_pair_prepare_force_ready(dev_coord_pbc,atom_domain,update)) {
     if(!genesis_coord_copy(dev_coord_pbc,atom_domain,3,reinterpret_cast<uintptr_t>(stream[0]),0)) {
     CUDA_CALL( cudaMemcpyAsync( dev_coord_pbc, _coord_pbc, size_force, cudaMemcpyHostToDevice, stream[0] ) );
     }
@@ -692,7 +693,7 @@ void gpu_init_buffer_pairlist(
 /*
  *
  */
-extern "C" int genesis_pair_prepare_copy(double*,int*,int*,int*,const double*,const int*,int,int,cudaStream_t);
+extern "C" int genesis_pair_prepare_copy(REAL*,int*,int*,int*,const REAL*,const int*,int,int,cudaStream_t);
 
 void gpu_memcpy_h2d_pairlist(
     REAL           *_coord_pbc,           // ( 1:atom_domain, 1:3 )
@@ -715,8 +716,8 @@ void gpu_memcpy_h2d_pairlist(
     CUDA_CALL( cudaMemsetAsync( dev_univ_ix_list, 0, size_univ_ix_list, st ) );
     CUDA_CALL( cudaMemsetAsync( dev_univ_iy_list, 0, size_univ_iy_list, st ) );
 
-    if(!genesis_pair_prepare_copy(reinterpret_cast<double*>(dev_coord_pbc),dev_atmcls_pbc,dev_natom,dev_start_atom,
-        reinterpret_cast<const double*>(_coord_pbc),_atmcls_pbc,atom_domain,int(size_natom/sizeof(int)),st)) {
+    if(!genesis_pair_prepare_copy(dev_coord_pbc,dev_atmcls_pbc,dev_natom,dev_start_atom,
+        _coord_pbc,_atmcls_pbc,atom_domain,int(size_natom/sizeof(int)),st)) {
     CUDA_CALL( cudaMemcpyAsync( dev_coord_pbc, _coord_pbc, size_coord_pbc, cudaMemcpyHostToDevice, st ) );
     CUDA_CALL( cudaMemcpyAsync( dev_atmcls_pbc, _atmcls_pbc, size_atmcls_pbc, cudaMemcpyHostToDevice, st ) );
     CUDA_CALL( cudaMemcpyAsync( dev_natom, _natom, size_natom, cudaMemcpyHostToDevice, st ) );
@@ -763,7 +764,7 @@ void gpu_memcpy_d2h_energy(
     double *_ene_virial
     )
 {
-    if(!genesis_nonbond_virial_stage(dev_coord_pbc,dev_force,size_force,sizeof(REAL),reinterpret_cast<void*>(stream[0]),reinterpret_cast<double*>(_coord_pbc),reinterpret_cast<double*>(_force)))
+    if(!genesis_nonbond_virial_stage(dev_coord_pbc,dev_force,size_force,sizeof(REAL),reinterpret_cast<void*>(stream[0]),_coord_pbc,_force))
         CUDA_CALL( cudaMemcpy( _force,  dev_force,  size_force,  cudaMemcpyDeviceToHost ) );
     CUDA_CALL( cudaMemcpy( _ene_virial, dev_ene_virial, size_ene_virial, cudaMemcpyDeviceToHost ) );
 }
@@ -779,7 +780,7 @@ void gpu_memcpy_d2h_force(
     cudaStream_t  st
     )
 {
-    if(!genesis_nonbond_virial_stage(dev_coord_pbc,dev_force,size_force,sizeof(REAL),reinterpret_cast<void*>(st),reinterpret_cast<double*>(_coord_pbc),reinterpret_cast<double*>(_force))
+    if(!genesis_nonbond_virial_stage(dev_coord_pbc,dev_force,size_force,sizeof(REAL),reinterpret_cast<void*>(st),_coord_pbc,_force)
         &&!genesis_nonbond_mirror_skip(_force,size_force,check_virial,sizeof(REAL)))
         CUDA_CALL( cudaMemcpyAsync( _force, dev_force, size_force, cudaMemcpyDeviceToHost, st ) );
 
@@ -7957,7 +7958,7 @@ extern "C" void gpu_sparse_download_(uint8_t *dense,uint8_t *packed,const int *b
 extern "C" void genesis_nonbond_force_view(void **force,void **queue) {
     genesis_nonbond_mirror_consume();
     genesis_nonbond_virial_consume();
-    if(sizeof(REAL)!=sizeof(double))abort();
+    static_assert(sizeof(REAL)==sizeof(genesis::WorkingReal),"nonbond working precision mismatch");
     *force=dev_force;
     *queue=reinterpret_cast<void*>(stream[0]);
 }

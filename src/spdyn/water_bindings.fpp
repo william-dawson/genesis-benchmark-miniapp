@@ -3,6 +3,7 @@
 #endif
 module water_migration_mod
   use iso_c_binding,only:c_int,c_int16_t,c_double
+  use constants_mod,only:wip
   use cudafor
   use sp_domain_str_mod
   use sp_boundary_str_mod
@@ -18,26 +19,26 @@ module water_migration_mod
       import c_int
     end function
     subroutine water_latch_c(x,v,water,counts,width,cells,water_width) bind(C,name='genesis_water_latch')
-      import c_int,c_double
-      real(c_double),device,intent(in)::x(*),v(*)
+      import c_int,wip
+      real(wip),device,intent(in)::x(*),v(*)
       integer(c_int),device,intent(in)::water(*),counts(*)
       integer(c_int),value::width,cells,water_width
     end subroutine
     integer(c_int) function outgoing_c(counts,ids,map,box,origin,cell_size,grid,stay,move, &
         stay_real,move_real,stay_ids,move_ids,stay_capacity,move_capacity) bind(C,name='genesis_water_outgoing')
-      import c_int,c_int16_t,c_double
+      import c_int,c_int16_t,c_double,wip
       integer(c_int),intent(in)::counts(*),ids(*),grid(*)
       integer(c_int16_t),intent(in)::map(*)
       real(c_double),intent(in)::box(*),origin(*),cell_size(*)
       integer(c_int),intent(out)::stay(*),move(*),stay_ids(*),move_ids(*)
-      real(c_double),intent(out)::stay_real(*),move_real(*)
+      real(wip),intent(out)::stay_real(*),move_real(*)
       integer(c_int),value::stay_capacity,move_capacity
     end function
     subroutine check_c(stay,move,stay_real,move_real,stay_ids,move_ids,stay_capacity,move_capacity) &
         bind(C,name='genesis_water_check')
-      import c_int,c_double
+      import c_int,wip
       integer(c_int),intent(in)::stay(*),move(*),stay_ids(*),move_ids(*)
-      real(c_double),intent(in)::stay_real(*),move_real(*)
+      real(wip),intent(in)::stay_real(*),move_real(*)
       integer(c_int),value::stay_capacity,move_capacity
     end subroutine
   end interface
@@ -45,9 +46,9 @@ contains
   subroutine scatter(stay_real,move_real,stay_ids,move_ids,stay,move,packed,packed_ids,ranges, &
       cells,stay_capacity,move_capacity) bind(C,name='genesis_water_scatter')
     integer(c_int),value::cells,stay_capacity,move_capacity
-    real(c_double),intent(out)::stay_real(18,stay_capacity,cells),move_real(18,move_capacity,cells)
+    real(wip),intent(out)::stay_real(18,stay_capacity,cells),move_real(18,move_capacity,cells)
     integer(c_int),intent(out)::stay_ids(3,stay_capacity,cells),move_ids(3,move_capacity,cells),stay(cells),move(cells)
-    real(c_double),intent(in)::packed(18,*)
+    real(wip),intent(in)::packed(18,*)
     integer(c_int),intent(in)::packed_ids(3,*),ranges(2,2*cells)
     integer::cell,first,last,count
     !$omp parallel do private(first,last,count) schedule(static)

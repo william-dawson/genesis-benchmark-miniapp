@@ -5,22 +5,24 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include "precision_types.h"
+using genesis::WorkingReal;
 #define CHECK(call) do { cudaError_t e=(call); if(e!=cudaSuccess) { \
   std::fprintf(stderr,"bonded migration: %s: %s\n",#call,cudaGetErrorString(e));std::abort(); } } while(0)
 extern "C" int genesis_bonded_residency_enabled();
 extern "C" int genesis_bonded_residency_prepare(int4*,int,int,cudaStream_t);
-extern "C" void genesis_bonded_residency_scatter(int,const int*,const int*,const int*,const int*,const int*,const double*,int*,int,cudaStream_t);
+extern "C" void genesis_bonded_residency_scatter(int,const int*,const int*,const int*,const int*,const int*,const WorkingReal*,int*,int,cudaStream_t);
 namespace {
-struct Cache { int *integers;double *reals;int total,sites; };
+struct Cache { int *integers;WorkingReal *reals;int total,sites; };
 struct CacheSet { Cache kind[3]; } caches{};
 bool ready[3]={false,false,false},initialized=false;
 int4 *input=nullptr,*selected=nullptr,*host_input=nullptr;
 uint8_t *flags=nullptr;
 int *result=nullptr,*host_result=nullptr,*keys=nullptr,*sorted_keys=nullptr,*values=nullptr,*order=nullptr;
 int *exits=nullptr,*ids=nullptr,*integers=nullptr,*source_ranges=nullptr,*destination_ranges=nullptr;
-double *reals=nullptr;
+WorkingReal *reals=nullptr;
 int *host_exits=nullptr,*host_ids=nullptr,*host_integers=nullptr,*host_source_ranges=nullptr,*host_destination_ranges=nullptr;
-double *host_reals=nullptr;
+WorkingReal *host_reals=nullptr;
 int16_t *mapping=nullptr,*owners=nullptr;
 int capacity=0,cached_atoms=0,cached_cells=0,cached_pitch=0;
 const int16_t *owner_address=nullptr;
@@ -62,7 +64,7 @@ __global__ void bonded_sort_keys(const int4 *moves,int *key,int *value,int n,int
   key[j]=(moves[j].x>>16)*cells+moves[j].z-1;value[j]=j;
 }
 __global__ void gather_bonded(const int4 *moves,const int *sorted,const int *key,int n,int cells,
-    int *out_exits,int *out_ids,int *out_int,double *out_real,int *src,int *dst,CacheSet data) {
+    int *out_exits,int *out_ids,int *out_int,WorkingReal *out_real,int *src,int *dst,CacheSet data) {
   const int j=blockIdx.x*blockDim.x+threadIdx.x;
   if(j>=n)return;
   const int4 source=moves[j];const int s=(source.x>>16)*cells+(source.x&65535)-1;
@@ -98,21 +100,21 @@ extern "C" void *genesis_bonded_staging(int n) {
     CHECK(cudaMalloc(&keys,size_t(capacity)*4));CHECK(cudaMalloc(&sorted_keys,size_t(capacity)*4));
     CHECK(cudaMalloc(&values,size_t(capacity)*4));CHECK(cudaMalloc(&order,size_t(capacity)*4));
     CHECK(cudaMalloc(&exits,size_t(capacity)*4));CHECK(cudaMalloc(&ids,size_t(capacity)*4));
-    CHECK(cudaMalloc(&integers,size_t(capacity)*9*4));CHECK(cudaMalloc(&reals,size_t(capacity)*4*sizeof(double)));
+    CHECK(cudaMalloc(&integers,size_t(capacity)*9*4));CHECK(cudaMalloc(&reals,size_t(capacity)*4*sizeof(WorkingReal)));
     CHECK(cudaHostAlloc(&host_exits,size_t(capacity)*4,cudaHostAllocPortable));
     CHECK(cudaHostAlloc(&host_ids,size_t(capacity)*4,cudaHostAllocPortable));
     CHECK(cudaHostAlloc(&host_integers,size_t(capacity)*9*4,cudaHostAllocPortable));
-    CHECK(cudaHostAlloc(&host_reals,size_t(capacity)*4*sizeof(double),cudaHostAllocPortable));
+    CHECK(cudaHostAlloc(&host_reals,size_t(capacity)*4*sizeof(WorkingReal),cudaHostAllocPortable));
   }
   return host_input;
 }
-extern "C" void genesis_bonded_cache(int kind,int n,const int *integer_data,const double *real_data) {
+extern "C" void genesis_bonded_cache(int kind,int n,const int *integer_data,const WorkingReal *real_data) {
   if(!initialized || kind<1 || kind>3 || ready[kind-1] || n<0)std::abort();
   Cache &c=caches.kind[kind-1];c.total=n;c.sites=kind+1;
-  CHECK(cudaMalloc(&c.integers,size_t(n?n:1)*9*4));CHECK(cudaMalloc(&c.reals,size_t(n?n:1)*4*sizeof(double)));
+  CHECK(cudaMalloc(&c.integers,size_t(n?n:1)*9*4));CHECK(cudaMalloc(&c.reals,size_t(n?n:1)*4*sizeof(WorkingReal)));
   if(n) {
     CHECK(cudaMemcpyAsync(c.integers,integer_data,size_t(n)*9*4,cudaMemcpyHostToDevice,queue));
-    CHECK(cudaMemcpyAsync(c.reals,real_data,size_t(n)*4*sizeof(double),cudaMemcpyHostToDevice,queue));
+    CHECK(cudaMemcpyAsync(c.reals,real_data,size_t(n)*4*sizeof(WorkingReal),cudaMemcpyHostToDevice,queue));
   }
   ready[kind-1]=true;
 }
@@ -164,7 +166,7 @@ extern "C" void genesis_bonded_batch(int n,const int16_t *map,const int16_t *own
     CHECK(cudaMemcpyAsync(host_exits,exits,size_t(m)*4,cudaMemcpyDeviceToHost,queue));
     CHECK(cudaMemcpyAsync(host_ids,ids,size_t(m)*4,cudaMemcpyDeviceToHost,queue));
     CHECK(cudaMemcpyAsync(host_integers,integers,size_t(m)*9*4,cudaMemcpyDeviceToHost,queue));
-    CHECK(cudaMemcpyAsync(host_reals,reals,size_t(m)*4*sizeof(double),cudaMemcpyDeviceToHost,queue));
+    CHECK(cudaMemcpyAsync(host_reals,reals,size_t(m)*4*sizeof(WorkingReal),cudaMemcpyDeviceToHost,queue));
   }
   if(!genesis_bonded_residency_enabled()) {
     CHECK(cudaMemcpyAsync(host_source_ranges,source_ranges,size_t(cells)*6*4,cudaMemcpyDeviceToHost,queue));
@@ -185,6 +187,6 @@ extern "C" void genesis_bonded_scatter_resident(int kind,int *incoming,int capac
   genesis_bonded_residency_scatter(kind,source_ranges,destination_ranges,exits,ids,integers,reals,incoming,capacity,queue);
 }
 
-extern "C" void genesis_bonded_device_packets(const int **source,const int **destination,const int **slots,const int **identities,const int **ivals,const double **rvals) {
+extern "C" void genesis_bonded_device_packets(const int **source,const int **destination,const int **slots,const int **identities,const int **ivals,const WorkingReal **rvals) {
  *source=source_ranges;*destination=destination_ranges;*slots=exits;*identities=ids;*ivals=integers;*rvals=reals;
 }

@@ -29,8 +29,8 @@ contains
   active=.false.;maximum=0
 #ifdef USE_GPU
   if(mode_c()==0)return
-  if(nproc_country/=1.or.d%num_cell_boundary/=0.or.storage_size(1.0_wp)/=64) &
-   error stop 'GPU pair preparation requires one-rank double without halos'
+  if(nproc_country/=1.or.d%num_cell_boundary/=0) &
+   error stop 'GPU pair preparation requires one rank without halos'
   active=begin_c(c_loc(d%translated),c_loc(d%atmcls_pbc),d%num_cell_local,size(d%coord,2),d%num_atom_domain)/=0
   maximum=d%max_num_atom
 #endif

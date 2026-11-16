@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
+#include "precision_types.h"
+using genesis::WorkingReal;
 
 extern "C" int genesis_coord_active();
 namespace {
@@ -25,11 +27,11 @@ int mode() {
         require(end!=text&&!*end&&value>=0&&value<=2,"mode must be 0, 1 or 2");return int(value);
     }();return result;
 }
-__global__ void dot_partials(const double *x,const double *force,double *output,int count) {
+__global__ void dot_partials(const WorkingReal *x,const WorkingReal *force,double *output,int count) {
     __shared__ double sums[3][256];
     const int lane=threadIdx.x,index=blockIdx.x*256+lane;
     for(int axis=0;axis<3;++axis)
-        sums[axis][lane]=index<count?__dmul_rn(x[axis*count+index],force[axis*count+index]):0.0;
+        sums[axis][lane]=index<count?double(WorkingReal(__dmul_rn(x[axis*count+index],force[axis*count+index]))):0.0;
     __syncthreads();
     for(int offset=128;offset;offset/=2) {
         if(lane<offset)for(int axis=0;axis<3;++axis)
@@ -69,15 +71,15 @@ extern "C" int genesis_nonbond_virial_host_required() {
     return !(requested&&mode()==1&&genesis_coord_active()&&!selected("GENESIS_FORCE_VERIFY","1")
         &&!selected("GENESIS_COORD_VERIFY","1"));
 }
-extern "C" int genesis_nonbond_virial_stage(const void *coordinates,const void *force,size_t bytes,int width,void *queue,double *host_coordinates,double *host_force) {
+extern "C" int genesis_nonbond_virial_stage(const void *coordinates,const void *force,size_t bytes,int width,void *queue,WorkingReal *host_coordinates,WorkingReal *host_force) {
     if(!requested)return 0;
     requested=false;
-    require(width==sizeof(double)&&bytes==3ull*atoms*sizeof(double),"invalid force shape");
+    require(width==sizeof(WorkingReal)&&bytes==3ull*atoms*sizeof(WorkingReal),"invalid force shape");
     if(!needed) {
         if(selected("GENESIS_FORCE_VERIFY","1"))return 0;
         consumer_pending=true;
         if(mode()==2) {
-            for(int i=0;i<3*atoms;++i)host_coordinates[i]=host_force[i]=std::numeric_limits<double>::quiet_NaN();
+            for(int i=0;i<3*atoms;++i)host_coordinates[i]=host_force[i]=std::numeric_limits<WorkingReal>::quiet_NaN();
             std::printf("GENESIS_NONBOND_VIRIAL: no-virial mirrors poisoned\n");
         }
         return 1;
@@ -88,7 +90,7 @@ extern "C" int genesis_nonbond_virial_stage(const void *coordinates,const void *
         checked(cudaMallocHost(&host,3*sizeof(double)));checked(cudaEventCreateWithFlags(&complete,cudaEventDisableTiming));
     }
     const auto stream=reinterpret_cast<cudaStream_t>(queue);
-    dot_partials<<<blocks,256,0,stream>>>(static_cast<const double*>(coordinates),static_cast<const double*>(force),partials,atoms);
+    dot_partials<<<blocks,256,0,stream>>>(static_cast<const WorkingReal*>(coordinates),static_cast<const WorkingReal*>(force),partials,atoms);
     checked(cudaGetLastError());
     dot_finish<<<1,256,0,stream>>>(partials,totals,blocks);checked(cudaGetLastError());
     checked(cudaMemcpyAsync(host,totals,3*sizeof(double),cudaMemcpyDeviceToHost,stream));
@@ -103,10 +105,10 @@ extern "C" int genesis_nonbond_virial_get(double *output) {
     for(int axis=0;axis<3;++axis) {require(std::isfinite(host[axis]),"nonfinite result");output[axis]=host[axis];}
     return mode();
 }
-extern "C" void genesis_nonbond_virial_poison(double *coordinates,double *force) {
+extern "C" void genesis_nonbond_virial_poison(WorkingReal *coordinates,WorkingReal *force) {
     if(selected("GENESIS_FORCE_VERIFY","1"))return;
     consumer_pending=true;
-    for(int i=0;i<3*atoms;++i)coordinates[i]=force[i]=std::numeric_limits<double>::quiet_NaN();
+    for(int i=0;i<3*atoms;++i)coordinates[i]=force[i]=std::numeric_limits<WorkingReal>::quiet_NaN();
     std::printf("GENESIS_NONBOND_VIRIAL: retired coordinate and force mirrors poisoned\n");
 }
 

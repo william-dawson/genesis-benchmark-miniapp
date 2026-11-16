@@ -16,6 +16,9 @@ module force_assembly_mod
   logical,save::resident_step=.false.
   real(wip),allocatable :: reference(:,:,:),observed(:,:,:)
   interface
+    integer(c_int) function bonded_active_c() bind(C,name='genesis_bonded_active')
+      import c_int
+    end function
     subroutine nonbond_request_c(eligible) bind(C,name="genesis_nonbond_mirror_request")
       import c_int
       integer(c_int),value::eligible
@@ -32,9 +35,10 @@ module force_assembly_mod
     end function
     subroutine assemble_c(cpu,fl,output,natom,start,width,cells,capacity,outcells,workers,atoms,merge,mode,download) &
         bind(C,name='genesis_force_assemble')
-      import c_double,c_int
-      real(c_double),intent(in)::cpu(*),fl(*)
-      real(c_double),intent(out)::output(*)
+      import wp,wip,c_int
+      real(wp),intent(in)::cpu(*)
+      real(wip),intent(in)::fl(*)
+      real(wip),intent(out)::output(*)
       integer(c_int),intent(in)::natom(*),start(*)
       integer(c_int),value::width,cells,capacity,outcells,workers,atoms,merge,mode,download
     end subroutine
@@ -119,9 +123,6 @@ contains
     force_assembly_enabled=assembly_mode()/=0
     if(force_assembly_enabled) then
       if(nproc_country/=1) error stop 'GPU force assembly requires one MPI rank'
-#if defined(_SINGLE) || defined(_MIXED)
-      error stop 'GPU force assembly requires double precision'
-#endif
     end if
   end function
 
@@ -133,7 +134,15 @@ contains
     logical,intent(in)::merge
     real(wip),contiguous,intent(inout)::output(:,:,:)
     integer::download,use_long,cell,atom,worker,start,atoms,status
-    real(8)::x,y,z,ratio,maxratio
+    real(wip)::x,y,z
+    real(8)::ratio,maxratio
+    real(8)::rms_ratio
+    integer::worst_atom,worst_cell
+    integer,save::verification_calls=0
+#if defined(_SINGLE) || defined(_MIXED)
+    real(8)::delta(3),values(3),sum_error,sum_reference,unit_roundoff
+    logical::producer_check
+#endif
     character(16)::value
     logical::verify
     if(domain%num_cell_boundary/=0) error stop 'GPU force assembly halo unsupported'
@@ -179,14 +188,49 @@ contains
     end if
     if(verify) then
       maxratio=0
+      rms_ratio=0;worst_atom=1;worst_cell=1;verification_calls=verification_calls+1
+#if defined(_SINGLE) || defined(_MIXED)
+      producer_check=bonded_active_c()/=0
+      unit_roundoff=0.5d0*real(epsilon(1.0_wp),8)
+      sum_error=0;sum_reference=0
+#endif
       do cell=1,domain%num_cell_local
         do atom=1,domain%num_atom(cell)
           if(.not.all(ieee_is_finite(observed(:,atom,cell)))) error stop 'GPU assembly nonfinite force'
+#if defined(_SINGLE) || defined(_MIXED)
+          if(producer_check)then
+            values=real(reference(:,atom,cell),8)
+            if(.not.all(ieee_is_finite(values)))error stop 'Nonfinite CPU force reference'
+            delta=real(observed(:,atom,cell),8)-values
+            ratio=sqrt(sum(delta*delta))/(1024*unit_roundoff*(1+sqrt(sum(values*values))))
+            sum_error=sum_error+sum(delta*delta);sum_reference=sum_reference+sum(values*values)
+          else
+#endif
           ratio=maxval(abs(observed(:,atom,cell)-reference(:,atom,cell))/(1.0d-8+1.0d-10*abs(reference(:,atom,cell))))
-          maxratio=max(maxratio,ratio)
+#if defined(_SINGLE) || defined(_MIXED)
+          end if
+#endif
+          if(ratio>maxratio)then
+            maxratio=ratio;worst_atom=atom;worst_cell=cell
+          end if
         end do
       end do
-      if(maxratio>1) error stop 'GPU force assembly disagrees with CPU sum'
+#if defined(_SINGLE) || defined(_MIXED)
+      if(producer_check)then
+        ratio=sqrt(sum_error/real(3*domain%num_atom_domain,8))/ &
+          (1024*unit_roundoff+128*unit_roundoff*sqrt(sum_reference/real(3*domain%num_atom_domain,8)))
+        rms_ratio=ratio
+        maxratio=max(maxratio,ratio)
+      end if
+#endif
+      if(maxratio>1)then
+        write(*,*)'GENESIS_FORCE_REJECT: evaluation max-ratio RMS-ratio ',verification_calls,maxratio,rms_ratio
+        write(*,*)'GENESIS_FORCE_REJECT: atom cell global-ID ',worst_atom,worst_cell,domain%id_l2g(worst_atom,worst_cell)
+        write(*,*)'GENESIS_FORCE_REJECT: coordinates ',domain%coord(:,worst_atom,worst_cell)
+        write(*,*)'GENESIS_FORCE_REJECT: CPU vector ',reference(:,worst_atom,worst_cell)
+        write(*,*)'GENESIS_FORCE_REJECT: GPU vector ',observed(:,worst_atom,worst_cell)
+        error stop 'GPU force assembly disagrees with CPU sum'
+      end if
       write(*,'(a,es20.12)') 'GENESIS_FORCE_VERIFY: force assembly pass ',maxratio
     end if
   end subroutine

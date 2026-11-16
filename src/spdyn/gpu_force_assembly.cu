@@ -2,6 +2,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>
+#include "precision_types.h"
+using genesis::WorkingReal;
+using genesis::IntegrationReal;
 
 extern "C" void genesis_nonbond_force_view(void **,void **);
 
@@ -12,17 +15,18 @@ void checked(cudaError_t result) {
         std::abort();
     }
 }
-double *assembled=nullptr,*slabs=nullptr,*long_force=nullptr;
+IntegrationReal *assembled=nullptr,*long_force=nullptr;
+WorkingReal *slabs=nullptr;
 int *counts=nullptr,*starts=nullptr;
 void *registered=nullptr;
-double *mapped=nullptr;
+WorkingReal *mapped=nullptr;
 std::size_t registered_bytes=0,output_bytes=0;
 int saved_width=0,saved_cells=0,saved_capacity=0,saved_workers=0;
 bool valid=false;
 const double *bonded=nullptr;
 
-__global__ void assemble(const double *cpu,const double *gpu,const double *fl,
-                         const int *natom,const int *start,double *out,
+__global__ void assemble(const WorkingReal *cpu,const WorkingReal *gpu,const IntegrationReal *fl,
+                         const int *natom,const int *start,IntegrationReal *out,
                          int width,int cells,int capacity,int out_cells,int workers,int atoms,bool merge,const double *bond) {
     const int index=blockIdx.x*blockDim.x+threadIdx.x;
     const int cell=index/width,atom=index%width;
@@ -32,7 +36,7 @@ __global__ void assemble(const double *cpu,const double *gpu,const double *fl,
         out[slot]=0;out[slot+1]=0;out[slot+2]=0;return;
     }
     const std::size_t stride=3ull*width*capacity;
-    double x=bond?bond[slot]:cpu[slot],y=bond?bond[slot+1]:cpu[slot+1],z=bond?bond[slot+2]:cpu[slot+2];
+    IntegrationReal x=bond?bond[slot]:cpu[slot],y=bond?bond[slot+1]:cpu[slot+1],z=bond?bond[slot+2]:cpu[slot+2];
     if(merge) {x+=fl[slot];y+=fl[slot+1];z+=fl[slot+2];}
     const int dense=start[cell]+atom;
     x+=gpu[dense];y+=gpu[atoms+dense];z+=gpu[2*atoms+dense];
@@ -43,11 +47,11 @@ __global__ void assemble(const double *cpu,const double *gpu,const double *fl,
 }
 }
 
-extern "C" void genesis_force_assemble(const double *cpu,const double *fl,double *output,
+extern "C" void genesis_force_assemble(const WorkingReal *cpu,const IntegrationReal *fl,IntegrationReal *output,
     const int *natom,const int *start,int width,int cells,int capacity,int out_cells,int workers,int atoms,int merge,int mode,int download) {
     if(width<=0||cells<=0||capacity<cells||out_cells<cells||workers<=0||(mode!=1&&mode!=2))std::abort();
-    const std::size_t slab_bytes=3ull*width*capacity*workers*sizeof(double);
-    const std::size_t bytes=3ull*width*out_cells*sizeof(double);
+    const std::size_t slab_bytes=3ull*width*capacity*workers*sizeof(WorkingReal);
+    const std::size_t bytes=3ull*width*out_cells*sizeof(IntegrationReal);
     if(!assembled) {
         saved_width=width;saved_cells=cells;saved_capacity=capacity;saved_workers=workers;output_bytes=bytes;
         checked(cudaMalloc(&assembled,bytes));checked(cudaMalloc(&long_force,bytes));
@@ -63,32 +67,33 @@ extern "C" void genesis_force_assemble(const double *cpu,const double *fl,double
     cudaStream_t stream=reinterpret_cast<cudaStream_t>(raw_stream);
     checked(cudaMemcpyAsync(counts,natom,cells*sizeof(int),cudaMemcpyHostToDevice,stream));
     checked(cudaMemcpyAsync(starts,start,cells*sizeof(int),cudaMemcpyHostToDevice,stream));
-    const double *source=nullptr;
+    const WorkingReal *source=nullptr;
     if(bonded) { source=nullptr; } else if(mode==1) {
         checked(cudaMemcpyAsync(slabs,cpu,slab_bytes,cudaMemcpyHostToDevice,stream));source=slabs;
     } else {
         if(registered!=cpu||registered_bytes!=slab_bytes) {
             if(registered)checked(cudaHostUnregister(registered));
-            registered=const_cast<double*>(cpu);registered_bytes=slab_bytes;
+            registered=const_cast<WorkingReal*>(cpu);registered_bytes=slab_bytes;
             checked(cudaHostRegister(registered,slab_bytes,cudaHostRegisterMapped));
             checked(cudaHostGetDevicePointer(&mapped,registered,0));
         }
         source=mapped;
     }
     if(merge)checked(cudaMemcpyAsync(long_force,fl,bytes,cudaMemcpyHostToDevice,stream));
-    assemble<<<(width*out_cells+255)/256,256,0,stream>>>(source,static_cast<double*>(raw_force),long_force,
+    assemble<<<(width*out_cells+255)/256,256,0,stream>>>(source,static_cast<WorkingReal*>(raw_force),long_force,
         counts,starts,assembled,width,cells,capacity,out_cells,workers,atoms,merge!=0,bonded);
     checked(cudaGetLastError());
     if(download)checked(cudaMemcpyAsync(output,assembled,bytes,cudaMemcpyDeviceToHost,stream));
     checked(cudaStreamSynchronize(stream));valid=true;
 }
 
-extern "C" int genesis_force_copy(double *destination,int width,int cells) {
+extern "C" int genesis_force_copy(IntegrationReal *destination,int width,int cells) {
     if(!valid)return 0;
-    const std::size_t bytes=3ull*width*cells*sizeof(double);
+    const std::size_t bytes=3ull*width*cells*sizeof(IntegrationReal);
     if(width!=saved_width||bytes>output_bytes)std::abort();
     checked(cudaMemcpy(destination,assembled,bytes,cudaMemcpyDeviceToDevice));
     return 1;
 }
 
 extern "C" void genesis_bonded_register(const double *values) { bonded=values; }
+extern "C" int genesis_bonded_active() { return bonded?1:0; }

@@ -8,9 +8,12 @@
 #include <cstring>
 #include <vector>
 #include <chrono>
+#include "precision_types.h"
+#include "migration_coordinates.h"
+using genesis::IntegrationReal;
 
-extern "C" void genesis_water_scatter(double *,double *,int *,int *,int *,int *,
-    const double *,const int *,const int *,int,int,int);
+extern "C" void genesis_water_scatter(IntegrationReal *,IntegrationReal *,int *,int *,int *,int *,
+    const IntegrationReal *,const int *,const int *,int,int,int);
 
 extern "C" int genesis_migration_resident();
 extern "C" int genesis_migration_host_packets();
@@ -29,12 +32,12 @@ int flag(const char *name) {
     return v[0]=='1';
 }
 struct State {
-    const double *x=nullptr,*v=nullptr;
+    const IntegrationReal *x=nullptr,*v=nullptr;
     const int *water=nullptr,*counts=nullptr;
     int width=0,cells=0,water_width=0,capacity=0,globals=0,total=0;
     int *keys[2]{},*values[2]{},*prefix=nullptr,*ids=nullptr,*ranges=nullptr,*error=nullptr,*packed_ids=nullptr;
     std::int16_t *map=nullptr;
-    double *packed=nullptr,*host=nullptr;
+    IntegrationReal *packed=nullptr,*host=nullptr;
     int *host_ids=nullptr,*host_ranges=nullptr;
     void *temporary=nullptr;
     size_t temporary_bytes=0;
@@ -43,14 +46,18 @@ struct State {
 } state;
 
 __device__ int cell_coordinate(double value,double origin,double box,double cell,int count) {
+#if defined(_SINGLE)
+    return genesis::single_cell_coordinate(value,origin,box,cell,count);
+#else
     double shifted=__dadd_rn(value,-origin);
     const double offset=__dadd_rn(__dmul_rn(box,0.5),-__dmul_rn(box,round(shifted/box)));
     shifted=__dadd_rn(shifted,offset);
     int index=int(shifted/cell);
     if(index==count)--index;
     return index;
+#endif
 }
-__global__ void classify(const double *x,const int *water,const int *counts,const int *prefix,
+__global__ void classify(const IntegrationReal *x,const int *water,const int *counts,const int *prefix,
     const std::int16_t *map,int *keys,int *values,int *error,int width,int cells,int water_width,
     double3 box,double3 origin,double3 size,int3 grid) {
     int entry=blockIdx.x*blockDim.x+threadIdx.x;
@@ -58,7 +65,7 @@ __global__ void classify(const double *x,const int *water,const int *counts,cons
     if(cell>=cells||water_index>=counts[cell])return;
     int atom=water[3ull*entry]-1;
     if(atom<0||atom>=width) {atomicExch(error,1);return;}
-    const double *position=x+3ull*(atom+width*cell);
+    const IntegrationReal *position=x+3ull*(atom+width*cell);
     const int cx=cell_coordinate(position[0],origin.x,box.x,size.x,grid.x);
     const int cy=cell_coordinate(position[1],origin.y,box.y,size.y,grid.y);
     const int cz=cell_coordinate(position[2],origin.z,box.z,size.z,grid.z);
@@ -70,8 +77,8 @@ __global__ void classify(const double *x,const int *water,const int *counts,cons
     keys[output]=destination==cell?cell:cells+destination;
 }
 
-__global__ void pack(const double *x,const double *v,const int *water,const int *ids,
-    const int *keys,const int *values,int *ranges,double *packed,int *packed_ids,int *error,
+__global__ void pack(const IntegrationReal *x,const IntegrationReal *v,const int *water,const int *ids,
+    const int *keys,const int *values,int *ranges,IntegrationReal *packed,int *packed_ids,int *error,
     int width,int water_width,int total) {
     const int item=blockIdx.x*blockDim.x+threadIdx.x;
     if(item>=total)return;
@@ -94,13 +101,10 @@ __global__ void pack(const double *x,const double *v,const int *water,const int 
 
 extern "C" int genesis_water_enabled() {
     static int enabled=flag("GENESIS_WATER_GPU");
-#if defined(_SINGLE) || defined(_MIXED)
-    require(!enabled,"requires double precision");
-#endif
     return enabled;
 }
 extern "C" int genesis_water_verify() {static int enabled=flag("GENESIS_WATER_VERIFY");return enabled;}
-extern "C" void genesis_water_latch(const double *x,const double *v,const int *water,const int *counts,
+extern "C" void genesis_water_latch(const IntegrationReal *x,const IntegrationReal *v,const int *water,const int *counts,
     int width,int cells,int water_width) {
     if(!genesis_water_enabled())return;
     auto &s=state;
@@ -112,7 +116,7 @@ extern "C" void genesis_water_latch(const double *x,const double *v,const int *w
 
 extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std::int16_t *map,
     const double *box,const double *origin,const double *size,const int *grid,int *stay,int *move,
-    double *stay_real,double *move_real,int *stay_ids,int *move_ids,int stay_capacity,int move_capacity) {
+    IntegrationReal *stay_real,IntegrationReal *move_real,int *stay_ids,int *move_ids,int stay_capacity,int move_capacity) {
     auto &s=state;
     if(!genesis_water_enabled()||!s.latched)return 0;
     s.latched=false;
@@ -137,9 +141,9 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
         checked(cudaMalloc(&s.map,size_t(globals)*sizeof(std::int16_t)));
         checked(cudaMalloc(&s.ranges,4ull*s.cells*sizeof(int)));
         checked(cudaMalloc(&s.error,sizeof(int)));
-        checked(cudaMalloc(&s.packed,18ull*s.capacity*sizeof(double)));
+        checked(cudaMalloc(&s.packed,18ull*s.capacity*sizeof(IntegrationReal)));
         checked(cudaMalloc(&s.packed_ids,3ull*s.capacity*sizeof(int)));
-        checked(cudaMallocHost(&s.host,18ull*s.capacity*sizeof(double)));
+        checked(cudaMallocHost(&s.host,18ull*s.capacity*sizeof(IntegrationReal)));
         checked(cudaMallocHost(&s.host_ids,3ull*s.capacity*sizeof(int)));
         checked(cudaMallocHost(&s.host_ranges,4ull*s.cells*sizeof(int)));
         checked(cub::DeviceRadixSort::SortPairs(nullptr,s.temporary_bytes,s.keys[0],s.keys[1],
@@ -172,7 +176,7 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
     if(s.timing)checked(cudaEventRecord(s.finish,0));
     const auto copied=std::chrono::steady_clock::now();
     if(genesis_migration_host_packets()) {
-    checked(cudaMemcpy(s.host,s.packed,18ull*s.total*sizeof(double),cudaMemcpyDeviceToHost));
+    checked(cudaMemcpy(s.host,s.packed,18ull*s.total*sizeof(IntegrationReal),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ids,s.packed_ids,3ull*s.total*sizeof(int),cudaMemcpyDeviceToHost));
     checked(cudaMemcpy(s.host_ranges,s.ranges,4ull*s.cells*sizeof(int),cudaMemcpyDeviceToHost));
     int error=0;checked(cudaMemcpy(&error,s.error,sizeof(int),cudaMemcpyDeviceToHost));
@@ -198,7 +202,7 @@ extern "C" int genesis_water_outgoing(const int *counts,const int *ids,const std
     return 1;
 }
 
-extern "C" void genesis_water_check(const int *stay,const int *move,const double *stay_real,const double *move_real,
+extern "C" void genesis_water_check(const int *stay,const int *move,const IntegrationReal *stay_real,const IntegrationReal *move_real,
     const int *stay_ids,const int *move_ids,int stay_capacity,int move_capacity) {
     auto &s=state;
     int seen=0;
@@ -208,9 +212,9 @@ extern "C" void genesis_water_check(const int *stay,const int *move,const double
         const int capacity=bucket<s.cells?stay_capacity:move_capacity;
         require((bucket<s.cells?stay:move)[cell]==count,"CPU/GPU water counts differ");
         if(!count)continue;
-        const double *real=(bucket<s.cells?stay_real:move_real)+18ull*capacity*cell;
+        const IntegrationReal *real=(bucket<s.cells?stay_real:move_real)+18ull*capacity*cell;
         const int *integer=(bucket<s.cells?stay_ids:move_ids)+3ull*capacity*cell;
-        require(!std::memcmp(real,s.host+18ull*first,18ull*count*sizeof(double)),"CPU/GPU water coordinates or velocities differ");
+        require(!std::memcmp(real,s.host+18ull*first,18ull*count*sizeof(IntegrationReal)),"CPU/GPU water coordinates or velocities differ");
         require(!std::memcmp(integer,s.host_ids+3ull*first,3ull*count*sizeof(int)),"CPU/GPU water identity/order differs");
         seen+=count;
     }
@@ -218,6 +222,6 @@ extern "C" void genesis_water_check(const int *stay,const int *move,const double
     std::printf("GENESIS_WATER_VERIFY: exact packing pass %d\n",seen);
 }
 
-extern "C" void genesis_water_payload_view(const double **x,const double **v,const double **real,const int **integer,const int **ranges,int *width,int *cells) {
+extern "C" void genesis_water_payload_view(const IntegrationReal **x,const IntegrationReal **v,const IntegrationReal **real,const int **integer,const int **ranges,int *width,int *cells) {
     *x=state.x;*v=state.v;*real=state.packed;*integer=state.packed_ids;*ranges=state.ranges;*width=state.width;*cells=state.cells;
 }

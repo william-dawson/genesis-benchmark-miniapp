@@ -14,7 +14,7 @@
 
 module sp_energy_pme_noopt_2dalltoall_mod
 
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
   use iso_c_binding, only: c_ptr, c_loc, c_int, c_double
 #endif
   use sp_boundary_str_mod
@@ -120,12 +120,27 @@ module sp_energy_pme_noopt_2dalltoall_mod
   public  :: pme_recip_noopt_2dalltoall
   public  :: pme_recip_noopt_2dalltoall_lj
 
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
   integer, external :: genesis_pme_gpu_enabled, genesis_pme_gpu_raw
   integer, external :: genesis_pme_gpu_parallel_clear
   integer, external :: genesis_long_force_requested
   real(dp), external :: genesis_pme_gpu_wall_time
   interface
+    subroutine genesis_pme_gpu_prepare(grid, ld, coeff, lengths, screening, electrostatic, bs3, bs3d, &
+                                      xy_rank, xy_size, z_rank, z_size, ranks, communicator, scale, inverse, volume)
+      import :: wp
+      integer, intent(in) :: grid(3), ld, xy_rank, xy_size, z_rank, z_size, ranks, communicator
+      real(wp), intent(in) :: coeff(ld,3), lengths(3), screening, electrostatic, bs3, bs3d
+      real(wp), intent(in) :: scale(3), inverse(3), volume
+    end subroutine
+    subroutine genesis_pme_gpu_recip(ncell, stride, natom, coord, charge, force, result)
+      import :: wp, wip, dp
+      integer, intent(in) :: ncell, stride, natom(*)
+      real(wip), intent(in) :: coord(3,stride,*)
+      real(wp), intent(in) :: charge(stride,*)
+      real(wip), intent(inout) :: force(3,stride,*)
+      real(dp), intent(out) :: result(4)
+    end subroutine
     subroutine genesis_pme_host_clear(ncell, stride, first, force) bind(c)
       import :: c_int, c_ptr
       integer(c_int), intent(in) :: ncell, stride, first
@@ -518,7 +533,7 @@ contains
     if (.not. allocated(f)) &
       return 
 
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
     if (genesis_pme_gpu_enabled() /= 0) call genesis_pme_gpu_release()
 #endif
 
@@ -583,12 +598,13 @@ contains
     vol_fact2 = 2.0_wp * PI * el_fact * box_inv(1)*box_inv(2)*box_inv(3)
     vol_fact4 = 2.0_wp * vol_fact2
 
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
     if (genesis_pme_gpu_enabled() /= 0) then
       if (n_bs /= 4 .or. nproc_city /= nprocx*nprocy*nprocz) &
         call error_msg('GPU PME requires order 4 and the full city communicator')
       call genesis_pme_gpu_prepare(ngrid, ngridmax, b2, box, alpha, el_fact, bs_fact3, bs_fact3d, &
-                                   my_xy_rank, nprocx*nprocy, my_z_rank, nprocz, nproc_city, mpi_comm_city)
+                                   my_xy_rank, nprocx*nprocy, my_z_rank, nprocz, nproc_city, mpi_comm_city, &
+                                   r_scale, box_inv, vol_fact4)
     ! Calculating self energy
     !
     u_self_no2 = 0.0_dp
@@ -974,7 +990,7 @@ contains
     real(dp),                intent(inout) :: eelec(nthread)
 
     ! local variables
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
     real(dp) :: gpu_result(4), gpu_begin, gpu_elapsed
 #endif
     real(wp)                 :: elec_temp
@@ -1000,7 +1016,7 @@ contains
     integer,         pointer :: natom(:)
 
 
-#if defined(USE_GPU) && !defined(_SINGLE) && !defined(_MIXED)
+#if defined(USE_GPU)
     if (genesis_pme_gpu_enabled() /= 0) then
       if (n_bs /= 4 .or. nproc_city /= nprocx*nprocy*nprocz) &
         call error_msg('GPU PME requires order 4 and the full city communicator')

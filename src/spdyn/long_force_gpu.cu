@@ -1,4 +1,6 @@
 #include <cuda_runtime.h>
+#include "precision_types.h"
+using genesis::IntegrationReal;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,12 +27,12 @@ int mode() {
     return selected;
 }
 bool requested=false,valid=false;
-double *padded=nullptr,*observed=nullptr,*integrator=nullptr,*published=nullptr;
+IntegrationReal *padded=nullptr,*observed=nullptr,*integrator=nullptr,*published=nullptr;
 int *counts=nullptr,*offsets=nullptr;
 int saved_width=0,saved_cells=0;
 std::vector<int> host_counts;
 
-__global__ void scatter_long(const double *packed,double *output,
+__global__ void scatter_long(const IntegrationReal *packed,IntegrationReal *output,
     const int *natom,const int *starts,int width,int cells) {
     const int index=blockIdx.x*blockDim.x+threadIdx.x;
     const int cell=index/width,atom=index%width;
@@ -63,15 +65,15 @@ extern "C" int genesis_long_force_requested_() {return requested;}
 extern "C" int genesis_long_force_reference() {return mode()==2;}
 extern "C" int genesis_long_force_available() {return valid;}
 
-extern "C" void genesis_long_force_publish(const double *force,const int *natom,
+extern "C" void genesis_long_force_publish(const IntegrationReal *force,const int *natom,
     const int *starts,int width,int cells,cudaStream_t stream) {
     if(!requested||width<=0||cells<=0) std::abort();
     if(!padded) {
         saved_width=width;saved_cells=cells;
-        checked(cudaMalloc(&padded,3ull*width*cells*sizeof(double)));
+        checked(cudaMalloc(&padded,3ull*width*cells*sizeof(IntegrationReal)));
         checked(cudaMalloc(&counts,cells*sizeof(int)));
         checked(cudaMalloc(&offsets,cells*sizeof(int)));
-        if(mode()==2) checked(cudaMallocHost(&observed,3ull*width*cells*sizeof(double)));
+        if(mode()==2) checked(cudaMallocHost(&observed,3ull*width*cells*sizeof(IntegrationReal)));
     }
     if(width!=saved_width||cells!=saved_cells) std::abort();
     checked(cudaMemcpyAsync(counts,natom,cells*sizeof(int),cudaMemcpyHostToDevice,stream));
@@ -89,10 +91,10 @@ extern "C" void genesis_long_force_publish(const double *force,const int *natom,
     valid=true;
 }
 
-extern "C" int genesis_long_force_copy(double *destination,double *reference,int width,int cells) {
+extern "C" int genesis_long_force_copy(IntegrationReal *destination,IntegrationReal *reference,int width,int cells) {
     if(!valid) return 0;
     if(width!=saved_width||cells!=saved_cells) std::abort();
-    const size_t bytes=3ull*width*cells*sizeof(double);
+    const size_t bytes=3ull*width*cells*sizeof(IntegrationReal);
     if(integrator&&integrator!=destination) std::abort();
     integrator=destination;
     // PME synchronizes publication; only the first handoff needs a copy.
@@ -104,12 +106,12 @@ extern "C" int genesis_long_force_copy(double *destination,double *reference,int
         checked(cudaMemcpy(observed,published,bytes,cudaMemcpyDeviceToHost));
         for(int cell=0;cell<cells;++cell) {
             const size_t first=3ull*width*cell,count=3ull*host_counts[cell];
-            if(std::memcmp(observed+first,reference+first,count*sizeof(double))) {
+            if(std::memcmp(observed+first,reference+first,count*sizeof(IntegrationReal))) {
                 std::fprintf(stderr,"GENESIS long-force publication differs from CPU scatter\n");
                 std::abort();
             }
             for(size_t atom=first;atom<first+count;++atom)
-                reference[atom]=std::numeric_limits<double>::quiet_NaN();
+                reference[atom]=std::numeric_limits<IntegrationReal>::quiet_NaN();
         }
         std::puts("GENESIS_LONG_FORCE_VERIFY: exact publication and CPU mirror poisoned");
     }

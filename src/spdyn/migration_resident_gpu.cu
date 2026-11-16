@@ -5,7 +5,7 @@
 #include <cstring>
 #include "migration_views.h"
 #define CHECK(c) do{cudaError_t e=(c);if(e!=cudaSuccess){std::fprintf(stderr,"migration residency: %s\n",cudaGetErrorString(e));std::abort();}}while(0)
-extern "C" int genesis_incoming_pair_view(ParticleView*,const double**);
+extern "C" int genesis_incoming_pair_view(ParticleView*,const genesis::WorkingReal**);
 namespace {void *scratch=nullptr;size_t scratch_bytes=0;
 __global__ void last_prefix(const int *counts,int *prefix,int n){if(!threadIdx.x && !blockIdx.x)prefix[n]=prefix[n-1]+counts[n-1];}
 }
@@ -14,7 +14,7 @@ extern "C" int genesis_migration_host_packets(){if(!genesis_migration_resident()
  for(const char *name:{"GENESIS_WATER_VERIFY","GENESIS_HGR_VERIFY","GENESIS_MIGRATION_VERIFY"}){const char *s=std::getenv(name);if(s && !std::strcmp(s,"1"))return 1;}
  const char *mode=std::getenv("GENESIS_INCOMING_GPU");return mode && !std::strcmp(mode,"2");}
 extern "C" int genesis_migration_prefix(int kind,int *prefix,int *ids,int cells,int width,int connect){
- if(!genesis_migration_resident())return 0;ParticleView view;const double *translation=nullptr;
+ if(!genesis_migration_resident())return 0;ParticleView view;const genesis::WorkingReal *translation=nullptr;
  if(!genesis_incoming_pair_view(&view,&translation))return 0;
  if(view.cells!=cells || view.width!=width || (kind==2 && view.connect!=connect))std::abort();
  const int *counts=kind==1?view.nw:view.hlocal;int n=kind==1?cells:cells*connect;

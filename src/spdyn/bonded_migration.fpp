@@ -41,10 +41,10 @@ module bonded_migration_mod
       type(c_ptr)::p
     end function
     subroutine cache_c(kind,n,integers,reals) bind(C,name='genesis_bonded_cache')
-      import c_int,c_double
+      import c_int,wp
       integer(c_int),value::kind,n
       integer(c_int),intent(in)::integers(*)
-      real(c_double),intent(in)::reals(*)
+      real(wp),intent(in)::reals(*)
     end subroutine
     subroutine batch_c(n,map,owner,atoms,cells,pitch,moved,exits,ids,integers,reals,src,dst) &
         bind(C,name='genesis_bonded_batch')
@@ -225,8 +225,8 @@ contains
     bonded_outgoing=.false.
     if(.not.enabled())return
     if(nproc_country/=1.or.domain%num_cell_boundary/=0.or.e%forcefield/=ForcefieldCHARMM.or. &
-       domain%nonbond_kernel/=NBK_GPU.or.storage_size(1.0_wp)/=64) &
-      error stop 'GPU bonded migration requires one-rank CHARMM double GPU and no halos'
+       domain%nonbond_kernel/=NBK_GPU) &
+      error stop 'GPU bonded migration requires one-rank CHARMM GPU and no halos'
     cells=domain%num_cell_local
     if(cells>=32768.or.size(domain%cell_pair,1)<cells.or.size(domain%cell_pair,1)/=size(domain%cell_pair,2)) &
       error stop 'Unexpected bonded cell-owner layout'
@@ -327,7 +327,7 @@ contains
         seen(id)=seen(id)+1
         call payload(kind,e,cell,slot,iv,rv)
         if(any(iv(1:ni)/=topology(kind)%initial_int(1:ni,id)))error stop 'Bonded topology integer mismatch'
-        if(compare(c_loc(rv(1)),c_loc(topology(kind)%initial_real(1,id)),int(8*nr,c_size_t))/=0) &
+        if(compare(c_loc(rv(1)),c_loc(topology(kind)%initial_real(1,id)),int((storage_size(rv)/8)*nr,c_size_t))/=0) &
           error stop 'Bonded topology real mismatch'
       end do
     end do
